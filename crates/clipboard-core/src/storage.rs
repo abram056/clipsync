@@ -14,10 +14,15 @@ const HISTORY_CAP_BYTES: u64 = 2_097_152;
 
 pub struct Storage {
     conn: Mutex<Connection>,
+    max_history_bytes: u64,
 }
 
 impl Storage {
     pub fn open(config: &StorageConfig) -> Result<Self> {
+        Self::open_with_history_cap(config, HISTORY_CAP_BYTES)
+    }
+
+    pub fn open_with_history_cap(config: &StorageConfig, max_history_bytes: u64) -> Result<Self> {
         let path = &config.path;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -29,6 +34,7 @@ impl Storage {
             .map_err(|e| Error::Storage(format!("PRAGMA failed: {}", e)))?;
         let storage = Self {
             conn: Mutex::new(conn),
+            max_history_bytes,
         };
         storage.migrate()?;
         Ok(storage)
@@ -224,6 +230,47 @@ impl Storage {
 
     // --- Clipboard History ---
 
+    pub fn get_history_entry(&self, clipboard_id: &Uuid) -> Result<Option<HistoryEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT clipboard_id, content, content_type, content_hash, origin_device_id, created_at, size_bytes FROM clipboard_history WHERE clipboard_id = ?1",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let result = stmt.query_row(params![clipboard_id.to_string()], |row| {
+            let cid: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let ct: String = row.get(2)?;
+            let hash: String = row.get(3)?;
+            let origin: String = row.get(4)?;
+            let created: String = row.get(5)?;
+            let size: i64 = row.get(6)?;
+            Ok((cid, content, ct, hash, origin, created, size))
+        });
+        match result {
+            Ok((cid, content, ct, hash, origin, created, size)) => {
+                let clipboard_id = Uuid::parse_str(&cid)
+                    .map_err(|e| Error::Storage(format!("invalid clipboard_id: {}", e)))?;
+                let origin_device_id = Uuid::parse_str(&origin)
+                    .map_err(|e| Error::Storage(format!("invalid origin_device_id: {}", e)))?;
+                let created_at = DateTime::parse_from_rfc3339(&created)
+                    .map_err(|e| Error::Storage(format!("invalid created_at: {}", e)))?
+                    .with_timezone(&Utc);
+                Ok(Some(HistoryEntry {
+                    clipboard_id,
+                    content,
+                    content_type: ct,
+                    content_hash: hash,
+                    origin_device_id,
+                    created_at,
+                    size_bytes: size as u64,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
     pub fn append_history(&self, entry: &HistoryEntry) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -239,7 +286,7 @@ impl Storage {
             ],
         )
         .map_err(|e| Error::Storage(e.to_string()))?;
-        self.evict_history(&conn, HISTORY_CAP_BYTES)?;
+        self.evict_history(&conn, self.max_history_bytes)?;
         Ok(())
     }
 
@@ -321,6 +368,13 @@ impl Storage {
                 break;
             }
         }
+        Ok(())
+    }
+
+    pub fn clear_history(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM clipboard_history", [])
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
 

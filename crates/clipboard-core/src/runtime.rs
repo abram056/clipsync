@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clipboard_proto::event::Event;
+use clipboard_proto::types::HistoryEntry;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::channels::{AppCommand, AppCommandTx, Channels};
@@ -53,6 +54,49 @@ impl AppHandle {
         });
     }
 
+    pub fn on_clipboard_changed(&self, content: &str) {
+        let _ = self.app_cmd_tx.send(AppCommand::ClipboardChanged {
+            content: content.to_string(),
+            content_type: "text/plain".to_string(),
+        });
+    }
+
+    pub fn restore_history_entry(&self, clipboard_id: uuid::Uuid) {
+        let _ = self
+            .app_cmd_tx
+            .send(AppCommand::RestoreHistoryEntry { clipboard_id });
+    }
+
+    pub fn history(&self, limit: usize) -> Vec<HistoryEntry> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.app_cmd_tx.send(AppCommand::ListHistory {
+            limit,
+            response: tx,
+        });
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async { rx.await.unwrap_or_default() })
+    }
+
+    pub fn clear_history(&self) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .app_cmd_tx
+            .send(AppCommand::ClearHistory { response: tx });
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async { rx.await.unwrap_or(Ok(())) })
+    }
+
+    pub fn is_paused(&self) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.app_cmd_tx.send(AppCommand::IsPaused { response: tx });
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async { rx.await.unwrap_or(false) })
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self.app_cmd_tx.send(AppCommand::SetPaused { paused });
+    }
+
     pub fn stop(&self) {
         let (tx, rx) = oneshot::channel();
         let _ = self.app_cmd_tx.send(AppCommand::Stop { response: tx });
@@ -76,7 +120,10 @@ pub fn start(config: AppConfig) -> Result<AppHandle, clipboard_proto::error::Err
         storage.get_device_identity()?
     };
 
-    let storage = Arc::new(Storage::open(&config.storage)?);
+    let storage = Arc::new(Storage::open_with_history_cap(
+        &config.storage,
+        config.history.max_size_bytes,
+    )?);
 
     let channels = Channels::new();
 

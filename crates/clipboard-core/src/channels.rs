@@ -21,6 +21,26 @@ pub enum AppCommand {
         device_id: uuid::Uuid,
         reason: String,
     },
+    ClipboardChanged {
+        content: String,
+        content_type: String,
+    },
+    RestoreHistoryEntry {
+        clipboard_id: uuid::Uuid,
+    },
+    ListHistory {
+        limit: usize,
+        response: oneshot::Sender<Vec<clipboard_proto::types::HistoryEntry>>,
+    },
+    ClearHistory {
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    IsPaused {
+        response: oneshot::Sender<bool>,
+    },
+    SetPaused {
+        paused: bool,
+    },
     Stop {
         response: oneshot::Sender<()>,
     },

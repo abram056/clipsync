@@ -88,7 +88,7 @@ impl HarnessConfig {
     pub fn to_app_config(&self) -> AppConfig {
         let mut discovery_targets = Vec::new();
         if let Some(peer) = self.peer_addr {
-            discovery_targets.push(SocketAddr::new(peer.ip(), self.discovery_port));
+            discovery_targets.push(peer);
         }
 
         AppConfig {

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/clipboard-proto",
+    "crates/clipboard-core",
+    "crates/clipboard-tui",
+]
+resolver = "2"

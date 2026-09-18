@@ -1,0 +1,234 @@
+pub mod channels;
+pub mod config;
+pub mod coordinator;
+pub mod discovery;
+pub mod messaging;
+pub mod pairing;
+pub mod replay_cache;
+pub mod runtime;
+pub mod storage;
+
+pub use config::AppConfig;
+pub use runtime::{start, AppHandle};
+pub use storage::Storage;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use crate::config::{HistoryConfig, NetworkConfig, PlatformConfig, StorageConfig, SyncConfig};
+
+pub struct HarnessConfig {
+    pub id: String,
+    pub listen_port: u16,
+    pub discovery_port: u16,
+    pub peer_addr: Option<SocketAddr>,
+    pub db_path: PathBuf,
+    pub auto_approve: bool,
+    pub auto_pair: bool,
+}
+
+impl HarnessConfig {
+    pub fn parse_args() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let mut id = "a".to_string();
+        let mut listen_port = 48272u16;
+        let mut discovery_port = 48271u16;
+        let mut peer_addr: Option<SocketAddr> = None;
+        let mut db_path = PathBuf::from("/tmp/clipboard-sync-test");
+        let mut auto_approve = false;
+        let mut auto_pair = false;
+
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--id" => {
+                    i += 1;
+                    id = args[i].clone();
+                }
+                "--listen-port" => {
+                    i += 1;
+                    listen_port = args[i].parse().unwrap_or(48272);
+                }
+                "--discovery-port" => {
+                    i += 1;
+                    discovery_port = args[i].parse().unwrap_or(48271);
+                }
+                "--peer" => {
+                    i += 1;
+                    peer_addr = args[i].parse().ok();
+                }
+                "--db" => {
+                    i += 1;
+                    db_path = PathBuf::from(&args[i]);
+                }
+                "--auto-approve" => {
+                    auto_approve = true;
+                }
+                "--auto-pair" => {
+                    auto_pair = true;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        db_path.push(format!("node_{}.db", id));
+
+        Self {
+            id,
+            listen_port,
+            discovery_port,
+            peer_addr,
+            db_path,
+            auto_approve,
+            auto_pair,
+        }
+    }
+
+    pub fn to_app_config(&self) -> AppConfig {
+        let mut discovery_targets = Vec::new();
+        if let Some(peer) = self.peer_addr {
+            discovery_targets.push(SocketAddr::new(peer.ip(), self.discovery_port));
+        }
+
+        AppConfig {
+            network: NetworkConfig {
+                discovery_port: self.discovery_port,
+                listen_port: self.listen_port,
+                discovery_interval_secs: 1,
+                heartbeat_interval_secs: 5,
+                peer_timeout_secs: 15,
+                reconnect_backoff_initial_ms: 1000,
+                reconnect_backoff_max_ms: 60000,
+                discovery_targets,
+            },
+            history: HistoryConfig {
+                max_size_bytes: 2_097_152,
+            },
+            sync: SyncConfig {
+                max_clipboard_bytes: 2_097_152,
+                max_peers: 16,
+                replay_cache_capacity: 1000,
+                replay_cache_ttl_secs: 3600,
+                pairing_timeout_secs: 30,
+                enabled: true,
+            },
+            storage: StorageConfig {
+                path: self.db_path.clone(),
+            },
+            platform: PlatformConfig {
+                clipboard_poll_interval_ms: 250,
+            },
+        }
+    }
+}
+
+pub fn run_harness(config: HarnessConfig) {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
+        )
+        .init();
+
+    let app_config = config.to_app_config();
+    let node_id_for_log = config.id.clone();
+    let listen_port = config.listen_port;
+    let discovery_port = config.discovery_port;
+    let auto_approve = config.auto_approve;
+    let auto_pair = config.auto_pair;
+    let handle = start(app_config).expect("failed to start");
+
+    tracing::info!(
+        "Node {} started (listen: {}, discovery: {})",
+        node_id_for_log,
+        listen_port,
+        discovery_port
+    );
+
+    let event_tx = handle.event_tx();
+    let mut event_rx = event_tx.subscribe();
+    let node_id = node_id_for_log.clone();
+    let app_cmd_tx = handle.app_cmd_tx.clone();
+
+    std::thread::spawn(move || loop {
+        match event_rx.try_recv() {
+            Ok(event) => match &event.event_type {
+                clipboard_proto::event::EventType::DeviceDiscovered(p) => {
+                    tracing::info!(
+                        "[{}] Discovered: {} ({}) at {}",
+                        node_id,
+                        p.device_name,
+                        p.device_id,
+                        p.ip_address
+                    );
+                    if auto_pair {
+                        tracing::info!("[{}] Auto-pairing with {}", node_id, p.device_id);
+                        let _ = app_cmd_tx.send(crate::channels::AppCommand::RequestPairing {
+                            device_id: p.device_id,
+                        });
+                    }
+                }
+                clipboard_proto::event::EventType::PairingRequested(p) => {
+                    tracing::info!(
+                        "[{}] Pairing request from {} ({})",
+                        node_id,
+                        p.device_name,
+                        p.device_id
+                    );
+                    if auto_approve {
+                        tracing::info!("[{}] Auto-approving {}", node_id, p.device_id);
+                        let _ = app_cmd_tx.send(crate::channels::AppCommand::ApprovePairing {
+                            device_id: p.device_id,
+                        });
+                    }
+                }
+                clipboard_proto::event::EventType::PairingAccepted(p) => {
+                    tracing::info!("[{}] Paired with {}", node_id, p.device_id);
+                }
+                clipboard_proto::event::EventType::DeviceConnected(p) => {
+                    tracing::info!(
+                        "[{}] Connected: {} ({:?})",
+                        node_id,
+                        p.device_name,
+                        p.connection_type
+                    );
+                }
+                clipboard_proto::event::EventType::DeviceDisconnected(p) => {
+                    tracing::info!(
+                        "[{}] Disconnected: {} ({:?})",
+                        node_id,
+                        p.device_id,
+                        p.reason
+                    );
+                }
+                clipboard_proto::event::EventType::DeviceConnectionFailed(p) => {
+                    tracing::warn!(
+                        "[{}] Connection failed: {} - {}",
+                        node_id,
+                        p.device_id,
+                        p.error
+                    );
+                }
+                _ => {}
+            },
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    });
+
+    tracing::info!("[{}] Press Ctrl+C to stop", node_id_for_log);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })
+    .expect("Error setting Ctrl-C handler");
+    let _ = rx.recv();
+
+    tracing::info!("[{}] Stopping...", node_id_for_log);
+    handle.stop();
+    tracing::info!("[{}] Stopped", node_id_for_log);
+}

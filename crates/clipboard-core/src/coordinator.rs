@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use clipboard_proto::error::ErrorCode;
@@ -18,6 +18,17 @@ use crate::storage::Storage;
 
 const TIMESTAMP_SKEW_SECS: i64 = 300;
 
+const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+const RECONNECT_STEP_1: Duration = Duration::from_secs(5);
+const RECONNECT_STEP_2: Duration = Duration::from_secs(15);
+const RECONNECT_CAP: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct ReconnectEntry {
+    next_attempt: Instant,
+    current_delay: Duration,
+}
+
 pub struct Coordinator {
     self_device_id: Uuid,
     self_device_name: String,
@@ -28,6 +39,7 @@ pub struct Coordinator {
     pairing: PairingManager,
     replay_cache: ReplayCache,
     discovered_peers: std::collections::HashMap<Uuid, PeerInfo>,
+    reconnect_queue: std::collections::HashMap<Uuid, ReconnectEntry>,
 }
 
 impl Coordinator {
@@ -66,6 +78,7 @@ impl Coordinator {
             pairing,
             replay_cache,
             discovered_peers: std::collections::HashMap::new(),
+            reconnect_queue: std::collections::HashMap::new(),
         };
 
         let mut event_rx = event_tx.subscribe();
@@ -114,6 +127,7 @@ impl Coordinator {
                     }
                     _ = tick_interval.tick() => {
                         coordinator.pairing.tick();
+                        coordinator.tick_reconnect();
                     }
                     _ = prune_interval.tick() => {
                         coordinator.replay_cache.prune();
@@ -227,10 +241,61 @@ impl Coordinator {
                         .send(crate::channels::MessagingCommand::ConnectTo { peer });
                 }
             }
-            EventType::DeviceDisconnected(p) => {
-                tracing::debug!("coordinator: device {} disconnected", p.device_id);
+            EventType::DeviceConnected(p) => {
+                self.reconnect_queue.remove(&p.device_id);
+            }
+            EventType::DeviceDisconnected(p)
+                if self.storage.is_trusted(&p.device_id).unwrap_or(false)
+                    && !self.reconnect_queue.contains_key(&p.device_id) =>
+            {
+                tracing::info!(
+                    "coordinator: scheduling reconnect for trusted peer {}",
+                    p.device_id
+                );
+                self.reconnect_queue.insert(
+                    p.device_id,
+                    ReconnectEntry {
+                        next_attempt: Instant::now() + RECONNECT_INITIAL,
+                        current_delay: RECONNECT_INITIAL,
+                    },
+                );
             }
             _ => {}
+        }
+    }
+
+    fn tick_reconnect(&mut self) {
+        let now = Instant::now();
+        let peers_to_reconnect: Vec<(Uuid, PeerInfo)> = self
+            .reconnect_queue
+            .iter()
+            .filter(|(_, entry)| now >= entry.next_attempt)
+            .filter_map(|(device_id, _)| {
+                self.discovered_peers
+                    .get(device_id)
+                    .cloned()
+                    .map(|p| (*device_id, p))
+            })
+            .collect();
+
+        for (device_id, peer) in peers_to_reconnect {
+            tracing::info!(
+                "coordinator: reconnecting to {} ({})",
+                peer.device_name,
+                device_id
+            );
+            let _ = self
+                .msg_tx
+                .send(crate::channels::MessagingCommand::ConnectTo { peer });
+
+            if let Some(entry) = self.reconnect_queue.get_mut(&device_id) {
+                entry.next_attempt = Instant::now() + entry.current_delay;
+                entry.current_delay = match entry.current_delay {
+                    d if d < RECONNECT_STEP_1 => RECONNECT_STEP_1,
+                    d if d < RECONNECT_STEP_2 => RECONNECT_STEP_2,
+                    _ => RECONNECT_CAP,
+                };
+            }
         }
     }
 }

@@ -45,7 +45,10 @@ struct ConnectionHandle {
     #[allow(dead_code)]
     device_id: Uuid,
     sink: Arc<Mutex<WsSink>>,
+    session_state: Arc<Mutex<SessionState>>,
 }
+
+type OutboxMap = Arc<Mutex<HashMap<Uuid, Vec<Envelope>>>>;
 
 fn ws_config() -> WebSocketConfig {
     #[allow(deprecated)]
@@ -69,6 +72,7 @@ pub struct MessagingService {
     inbound_tx: InboundEnvelopeTx,
     trusted_devices: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
     active_connections: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
+    outbox: OutboxMap,
 }
 
 impl MessagingService {
@@ -96,6 +100,7 @@ impl MessagingService {
             inbound_tx,
             trusted_devices: Arc::new(Mutex::new(HashMap::new())),
             active_connections: Arc::new(Mutex::new(HashMap::new())),
+            outbox: Arc::new(Mutex::new(HashMap::new())),
         };
 
         tokio::spawn(async move {
@@ -160,13 +165,16 @@ impl MessagingService {
             let event_tx = self.event_tx.clone();
             let trusted = self.trusted_devices.clone();
             let active = self.active_connections.clone();
+            let outbox = self.outbox.clone();
             let self_id = self.self_device_id;
             let self_name = self.self_device_name.clone();
             let platform = self.platform;
+            let storage = storage.clone();
 
             tokio::spawn(async move {
                 Self::command_loop(
                     msg_rx, self_id, self_name, platform, inbound_tx, event_tx, trusted, active,
+                    outbox, storage,
                 )
                 .await;
             })
@@ -314,6 +322,7 @@ impl MessagingService {
         );
 
         let sink = Arc::new(Mutex::new(ws_sink));
+        let session_state_handle = Arc::new(Mutex::new(session_state.clone()));
         {
             let mut conns = active.lock().await;
             conns.insert(
@@ -321,6 +330,7 @@ impl MessagingService {
                 ConnectionHandle {
                     device_id: peer_device_id,
                     sink: sink.clone(),
+                    session_state: session_state_handle.clone(),
                 },
             );
         }
@@ -352,6 +362,7 @@ impl MessagingService {
 
         let mut _last_pong = tokio::time::Instant::now();
         loop {
+            let current_state = session_state_handle.lock().await.clone();
             tokio::select! {
                 msg = ws_stream.next() => {
                     match msg {
@@ -365,7 +376,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &session_state, peer_device_id, &inbound_tx,
+                                env, &current_state, peer_device_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
@@ -378,7 +389,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &session_state, peer_device_id, &inbound_tx,
+                                env, &current_state, peer_device_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
@@ -477,6 +488,8 @@ impl MessagingService {
         event_tx: broadcast::Sender<Event>,
         trusted: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
+        outbox: OutboxMap,
+        storage: Arc<Storage>,
     ) {
         while let Some(cmd) = msg_rx.recv().await {
             match cmd {
@@ -492,13 +505,14 @@ impl MessagingService {
                     let event_tx = event_tx.clone();
                     let trusted = trusted.clone();
                     let active = active.clone();
+                    let outbox = outbox.clone();
                     let self_id = self_device_id;
                     let self_name = self_device_name.clone();
 
                     tokio::spawn(async move {
                         Self::connect_to_peer(
                             peer_addr, peer_id, self_id, self_name, platform, inbound_tx, event_tx,
-                            trusted, active,
+                            trusted, active, outbox,
                         )
                         .await;
                     });
@@ -512,7 +526,41 @@ impl MessagingService {
                         let mut sink = conn.sink.lock().await;
                         let _ = send_envelope(&mut sink, &envelope).await;
                     } else {
-                        tracing::warn!("messaging: no connection to {}", device_id);
+                        drop(conns);
+                        tracing::info!(
+                            "messaging: no connection to {}, queuing envelope",
+                            device_id
+                        );
+                        let mut ob = outbox.lock().await;
+                        ob.entry(device_id).or_default().push(envelope);
+                    }
+                }
+                MessagingCommand::ReloadTrusted => {
+                    let mut map = trusted.lock().await;
+                    if let Ok(peers) = storage.trusted_peers() {
+                        for p in peers {
+                            map.entry(p.device_id).or_insert_with(|| PeerInfo {
+                                device_id: p.device_id,
+                                device_name: p.device_name,
+                                platform: p
+                                    .platform
+                                    .unwrap_or(clipboard_proto::types::Platform::Linux),
+                                address: "0.0.0.0:0".parse().unwrap(),
+                            });
+                        }
+                    }
+                    tracing::debug!("messaging: reloaded trusted peers ({} entries)", map.len());
+                    drop(map);
+
+                    let conns = active.lock().await;
+                    for (id, conn) in conns.iter() {
+                        if trusted.lock().await.contains_key(id) {
+                            let mut state = conn.session_state.lock().await;
+                            if *state == SessionState::Pairing {
+                                *state = SessionState::Trusted;
+                                tracing::info!("messaging: promoted {} to Trusted", id);
+                            }
+                        }
                     }
                 }
                 MessagingCommand::Stop => {
@@ -533,6 +581,7 @@ impl MessagingService {
         event_tx: broadcast::Sender<Event>,
         trusted: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
+        outbox: OutboxMap,
     ) {
         tracing::info!("messaging: connecting to {} at {}", peer_id, addr);
 
@@ -615,6 +664,7 @@ impl MessagingService {
         tracing::info!("messaging: connected to {} ({:?})", peer_id, session_state);
 
         let sink = Arc::new(Mutex::new(ws_sink));
+        let session_state_handle = Arc::new(Mutex::new(session_state.clone()));
         {
             let mut conns = active.lock().await;
             conns.insert(
@@ -622,8 +672,26 @@ impl MessagingService {
                 ConnectionHandle {
                     device_id: peer_id,
                     sink: sink.clone(),
+                    session_state: session_state_handle.clone(),
                 },
             );
+        }
+
+        // Flush any queued outbox messages for this peer
+        {
+            let mut ob = outbox.lock().await;
+            if let Some(queued) = ob.remove(&peer_id) {
+                let count = queued.len();
+                let mut s = sink.lock().await;
+                for env in queued {
+                    let _ = send_envelope(&mut s, &env).await;
+                }
+                tracing::info!(
+                    "messaging: flushed {} queued messages to {}",
+                    count,
+                    peer_id
+                );
+            }
         }
 
         let heartbeat_interval = Duration::from_secs(15);
@@ -651,6 +719,7 @@ impl MessagingService {
         let peer_timeout = Duration::from_secs(45);
         let mut _last_pong = tokio::time::Instant::now();
         loop {
+            let current_state = session_state_handle.lock().await.clone();
             tokio::select! {
                 msg = ws_stream.next() => {
                     match msg {
@@ -664,7 +733,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &session_state, peer_id, &inbound_tx,
+                                env, &current_state, peer_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
@@ -677,7 +746,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &session_state, peer_id, &inbound_tx,
+                                env, &current_state, peer_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {

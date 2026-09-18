@@ -107,15 +107,16 @@ impl Coordinator {
                 tokio::select! {
                     cmd = app_cmd_rx.recv() => {
                         match cmd {
-                            Some(crate::channels::AppCommand::RequestPairing { device_id }) => {
-                                if let Some(peer) = coordinator.discovered_peers.get(&device_id).cloned() {
-                                    coordinator.pairing.request_pairing(&device_id, &peer);
-                                } else {
-                                    tracing::warn!("coordinator: unknown device {}", device_id);
-                                }
+                        Some(crate::channels::AppCommand::RequestPairing { device_id }) => {
+                            if let Some(peer) = coordinator.discovered_peers.get(&device_id).cloned() {
+                                coordinator.pairing.request_pairing(&device_id, &peer);
+                            } else {
+                                tracing::warn!("coordinator: unknown device {}", device_id);
                             }
+                        }
                             Some(crate::channels::AppCommand::ApprovePairing { device_id }) => {
                                 coordinator.pairing.approve(&device_id);
+                                let _ = coordinator.msg_tx.send(crate::channels::MessagingCommand::ReloadTrusted);
                             }
                             Some(crate::channels::AppCommand::RejectPairing { device_id, reason }) => {
                                 coordinator.pairing.reject(&device_id, &reason);
@@ -151,19 +152,19 @@ impl Coordinator {
                             None => break,
                         }
                     }
-                    inbound = inbound_rx.recv() => {
-                        match inbound {
-                            Some(msg) => {
-                                coordinator.handle_inbound(msg).await;
-                            }
+                inbound = inbound_rx.recv() => {
+                    match inbound {
+                        Some(msg) => {
+                            coordinator.handle_inbound(msg).await;
+                        }
                             None => break,
                         }
                     }
-                    event = event_rx.recv() => {
-                        if let Ok(event) = event {
-                            coordinator.handle_event(event).await;
-                        }
+                event = event_rx.recv() => {
+                    if let Ok(event) = event {
+                        coordinator.handle_event(event).await;
                     }
+                }
                     _ = tick_interval.tick() => {
                         coordinator.pairing.tick();
                         coordinator.tick_reconnect();
@@ -597,6 +598,15 @@ impl Coordinator {
                         },
                     );
                 }
+            }
+            EventType::PairingAccepted(p) => {
+                tracing::info!(
+                    "coordinator: pairing accepted with {}, reloading trusted peers",
+                    p.device_id
+                );
+                let _ = self
+                    .msg_tx
+                    .send(crate::channels::MessagingCommand::ReloadTrusted);
             }
             _ => {}
         }

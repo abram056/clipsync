@@ -25,6 +25,7 @@ struct RosterEntry {
 pub struct DiscoveryService {
     self_device_id: Uuid,
     self_device_name: String,
+    discovery_port: u16,
     listen_port: u16,
     platform: clipboard_proto::types::Platform,
     broadcast_interval: Duration,
@@ -44,6 +45,7 @@ impl DiscoveryService {
         let svc = Self {
             self_device_id,
             self_device_name,
+            discovery_port: config.network.discovery_port,
             listen_port: config.network.listen_port,
             platform,
             broadcast_interval: Duration::from_secs(config.network.discovery_interval_secs),
@@ -55,7 +57,7 @@ impl DiscoveryService {
     }
 
     async fn run(self) {
-        let bind_addr = format!("0.0.0.0:{}", self.listen_port);
+        let bind_addr = format!("0.0.0.0:{}", self.discovery_port);
         let socket = match UdpSocket::bind(&bind_addr).await {
             Ok(s) => s,
             Err(e) => {
@@ -111,7 +113,8 @@ impl DiscoveryService {
     }
 
     async fn broadcast_discover(&self, socket: &UdpSocket) {
-        let broadcast_addr = SocketAddr::new("255.255.255.255".parse().unwrap(), self.listen_port);
+        let broadcast_addr =
+            SocketAddr::new("255.255.255.255".parse().unwrap(), self.discovery_port);
         let envelope = Envelope::build(
             MessageType::Discover,
             self.self_device_id,

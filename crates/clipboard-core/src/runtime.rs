@@ -73,8 +73,9 @@ impl AppHandle {
             limit,
             response: tx,
         });
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async { rx.await.unwrap_or_default() })
+        self.runtime
+            .handle()
+            .block_on(async { rx.await.unwrap_or_default() })
     }
 
     pub fn clear_history(&self) -> Result<(), String> {
@@ -82,15 +83,17 @@ impl AppHandle {
         let _ = self
             .app_cmd_tx
             .send(AppCommand::ClearHistory { response: tx });
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async { rx.await.unwrap_or(Ok(())) })
+        self.runtime
+            .handle()
+            .block_on(async { rx.await.unwrap_or(Ok(())) })
     }
 
     pub fn is_paused(&self) -> bool {
         let (tx, rx) = oneshot::channel();
         let _ = self.app_cmd_tx.send(AppCommand::IsPaused { response: tx });
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async { rx.await.unwrap_or(false) })
+        self.runtime
+            .handle()
+            .block_on(async { rx.await.unwrap_or(false) })
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -100,11 +103,21 @@ impl AppHandle {
     pub fn stop(&self) {
         let (tx, rx) = oneshot::channel();
         let _ = self.app_cmd_tx.send(AppCommand::Stop { response: tx });
-        let _ = self.runtime.block_on(rx);
+        let _ = self.runtime.handle().block_on(rx);
     }
 
     pub fn event_tx(&self) -> broadcast::Sender<Event> {
         self.event_tx.clone()
+    }
+
+    pub fn app_cmd_tx(&self) -> AppCommandTx {
+        self.app_cmd_tx.clone()
+    }
+
+    /// Send a raw command (for integration testing).
+    #[doc(hidden)]
+    pub fn send_command(&self, cmd: AppCommand) {
+        let _ = self.app_cmd_tx.send(cmd);
     }
 }
 
@@ -128,6 +141,8 @@ pub fn start(config: AppConfig) -> Result<AppHandle, clipboard_proto::error::Err
     let channels = Channels::new();
 
     let platform = clipboard_proto::message::current_platform();
+
+    let _guard = runtime.enter();
 
     let _discovery_handle = DiscoveryService::spawn(
         &config,

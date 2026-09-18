@@ -61,6 +61,7 @@ pub enum MessagingCommand {
         device_id: uuid::Uuid,
         envelope: Envelope,
     },
+    ReloadTrusted,
     Stop,
 }
 

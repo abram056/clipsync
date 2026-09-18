@@ -82,6 +82,11 @@ impl PairingManager {
             return;
         }
 
+        eprintln!(
+            "[PAIRING] on_pairing_request: accepting request from {}",
+            device_id
+        );
+
         self.pending.insert(
             device_id,
             PendingRequest {

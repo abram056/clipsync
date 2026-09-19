@@ -264,7 +264,7 @@ fn pause_resume() {
     let mut rx_a = setup_paired(&handle_a, &handle_b);
 
     handle_a.set_paused(true);
-    assert!(handle_a.is_paused());
+    assert!(handle_a.is_paused().unwrap());
 
     handle_b.on_clipboard_changed("while paused");
     std::thread::sleep(Duration::from_secs(2));
@@ -275,7 +275,7 @@ fn pause_resume() {
     assert!(!received, "paused node should not receive clipboard");
 
     handle_a.set_paused(false);
-    assert!(!handle_a.is_paused());
+    assert!(!handle_a.is_paused().unwrap());
 
     handle_a.stop();
     handle_b.stop();
@@ -292,7 +292,7 @@ fn history_list_and_restore() {
     handle.on_clipboard_changed("second");
     std::thread::sleep(Duration::from_millis(300));
 
-    let history = handle.history(10);
+    let history = handle.history(10).unwrap();
     assert!(
         history.len() >= 2,
         "history should have at least 2 entries, got {}",

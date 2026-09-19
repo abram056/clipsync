@@ -182,14 +182,14 @@ fn trusted_peers_list_after_pairing() {
 
     setup_paired_manual(&handle_a, &handle_b);
 
-    let trusted_a = handle_a.trusted_peers();
+    let trusted_a = handle_a.trusted_peers().unwrap();
     assert_eq!(trusted_a.len(), 1, "A should have 1 trusted peer");
     assert!(
         !trusted_a[0].device_name.is_empty(),
         "trusted peer name should not be empty"
     );
 
-    let trusted_b = handle_b.trusted_peers();
+    let trusted_b = handle_b.trusted_peers().unwrap();
     assert_eq!(trusted_b.len(), 1, "B should have 1 trusted peer");
 
     handle_a.stop();
@@ -207,7 +207,7 @@ fn history_size_bytes_after_sync() {
     handle.on_clipboard_changed("second");
     std::thread::sleep(Duration::from_millis(300));
 
-    let size = handle.history_size_bytes();
+    let size = handle.history_size_bytes().unwrap();
     assert!(size > 0, "history size should be > 0, got {}", size);
 
     handle.stop();
@@ -218,7 +218,7 @@ fn pending_pairing_requests_query() {
     let config = make_config(4, 61211, 61212, None);
     let handle = start(config).expect("start");
 
-    let pending = handle.pending_pairing_requests();
+    let pending = handle.pending_pairing_requests().unwrap();
     assert!(
         pending.is_empty(),
         "should have no pending pairing requests at start"
@@ -274,19 +274,30 @@ fn forget_stops_sync_and_reconnects() {
 
     // Confirm pairing
     assert_eq!(
-        handle_a.trusted_peers().len(),
+        handle_a.trusted_peers().unwrap().len(),
         1,
         "A should have 1 trusted peer after pairing"
     );
 
     // A forgets B
-    let b_id = handle_a.trusted_peers().first().unwrap().device_id;
+    let b_id = handle_a.trusted_peers().unwrap().first().unwrap().device_id;
     handle_a.forget_device(b_id).unwrap();
+    assert!(
+        wait_for_event(&mut rx_a, Duration::from_secs(2), |event| {
+            matches!(
+                event,
+                EventType::DeviceDisconnected(payload)
+                    if payload.device_id == b_id
+                        && matches!(payload.reason, clipboard_proto::event::DisconnectReason::Graceful)
+            )
+        }),
+        "forget should emit a graceful disconnect"
+    );
     std::thread::sleep(Duration::from_secs(1));
 
     // A should have no trusted peers
     assert!(
-        handle_a.trusted_peers().is_empty(),
+        handle_a.trusted_peers().unwrap().is_empty(),
         "A should have 0 trusted peers after forget"
     );
 

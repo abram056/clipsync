@@ -102,6 +102,7 @@ impl Coordinator {
         tokio::spawn(async move {
             let mut tick_interval = time::interval(Duration::from_secs(1));
             let mut prune_interval = time::interval(Duration::from_secs(60));
+            let mut inbound_open = true;
 
             loop {
                 tokio::select! {
@@ -128,11 +129,27 @@ impl Coordinator {
                                 coordinator.on_restore(clipboard_id);
                             }
                             Some(crate::channels::AppCommand::ListHistory { limit, response }) => {
-                                let result = coordinator.storage.list_history(limit).unwrap_or_default();
+                                let result = coordinator.storage.list_history(limit).map_err(|e| e.to_string());
                                 let _ = response.send(result);
                             }
                             Some(crate::channels::AppCommand::ClearHistory { response }) => {
                                 let result = coordinator.storage.clear_history().map_err(|e| e.to_string());
+                                let _ = response.send(result);
+                            }
+                            Some(crate::channels::AppCommand::ListTrustedPeers { response }) => {
+                                let result = coordinator.storage.trusted_peers().map_err(|e| e.to_string());
+                                let _ = response.send(result);
+                            }
+                            Some(crate::channels::AppCommand::ForgetDevice { device_id, response }) => {
+                                let result = coordinator.handle_forget(device_id);
+                                let _ = response.send(result);
+                            }
+                            Some(crate::channels::AppCommand::HistorySize { response }) => {
+                                let result = coordinator.storage.history_size_bytes().map_err(|e| e.to_string());
+                                let _ = response.send(result);
+                            }
+                            Some(crate::channels::AppCommand::ListPairingRequests { response }) => {
+                                let result = Ok(coordinator.pairing.pending_requests());
                                 let _ = response.send(result);
                             }
                             Some(crate::channels::AppCommand::IsPaused { response }) => {
@@ -152,12 +169,18 @@ impl Coordinator {
                             None => break,
                         }
                     }
-                inbound = inbound_rx.recv() => {
+                inbound = inbound_rx.recv(), if inbound_open => {
                     match inbound {
                         Some(msg) => {
                             coordinator.handle_inbound(msg).await;
                         }
-                            None => break,
+                            None => {
+                                // Messaging can be stopped independently. Keep the
+                                // coordinator alive so its query and shutdown API
+                                // continues to report meaningful results.
+                                inbound_open = false;
+                                tracing::warn!("coordinator: inbound messaging channel closed");
+                            }
                         }
                     }
                 event = event_rx.recv() => {
@@ -292,6 +315,7 @@ impl Coordinator {
 
     fn on_restore(&mut self, clipboard_id: Uuid) {
         if let Ok(Some(entry)) = self.storage.get_history_entry(&clipboard_id) {
+            self.replay_cache.check_and_record_hash(&entry.content_hash);
             self.emit_event(EventType::ClipboardRestored(
                 clipboard_proto::event::ClipboardRestoredPayload { clipboard_id },
             ));
@@ -299,6 +323,22 @@ impl Coordinator {
         } else {
             tracing::warn!("coordinator: history entry {} not found", clipboard_id);
         }
+    }
+
+    fn handle_forget(&mut self, device_id: Uuid) -> Result<(), String> {
+        self.storage
+            .remove_trusted_peer(&device_id)
+            .map_err(|e| e.to_string())?;
+        self.reconnect_queue.remove(&device_id);
+        self.connected_peers.remove(&device_id);
+        let _ = self
+            .msg_tx
+            .send(crate::channels::MessagingCommand::Disconnect { device_id });
+        let _ = self
+            .msg_tx
+            .send(crate::channels::MessagingCommand::ReloadTrusted);
+        tracing::info!("coordinator: forgot device {}", device_id);
+        Ok(())
     }
 
     async fn handle_inbound(&mut self, msg: crate::channels::InboundEnvelope) {

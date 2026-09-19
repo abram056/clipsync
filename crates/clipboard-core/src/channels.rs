@@ -1,6 +1,6 @@
 use clipboard_proto::event::Event;
 use clipboard_proto::message::Envelope;
-use clipboard_proto::types::PeerInfo;
+use clipboard_proto::types::{PairingRequest, PeerInfo, TrustedPeer};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 // ---------------------------------------------------------------------------
@@ -30,10 +30,23 @@ pub enum AppCommand {
     },
     ListHistory {
         limit: usize,
-        response: oneshot::Sender<Vec<clipboard_proto::types::HistoryEntry>>,
+        response: oneshot::Sender<Result<Vec<clipboard_proto::types::HistoryEntry>, String>>,
     },
     ClearHistory {
         response: oneshot::Sender<Result<(), String>>,
+    },
+    ListTrustedPeers {
+        response: oneshot::Sender<Result<Vec<TrustedPeer>, String>>,
+    },
+    ForgetDevice {
+        device_id: uuid::Uuid,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    HistorySize {
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    ListPairingRequests {
+        response: oneshot::Sender<Result<Vec<PairingRequest>, String>>,
     },
     IsPaused {
         response: oneshot::Sender<bool>,
@@ -60,6 +73,9 @@ pub enum MessagingCommand {
     Send {
         device_id: uuid::Uuid,
         envelope: Envelope,
+    },
+    Disconnect {
+        device_id: uuid::Uuid,
     },
     ReloadTrusted,
     Stop,

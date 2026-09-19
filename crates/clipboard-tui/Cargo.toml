@@ -12,7 +12,12 @@ clipboard-core = { path = "../clipboard-core" }
 clipboard-proto = { path = "../clipboard-proto" }
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.26"
+crossterm = "0.27"
 arboard = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 thiserror = "1"
+dirs = "5"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }

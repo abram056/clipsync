@@ -111,20 +111,23 @@ impl MessagingService {
     async fn run(self, storage: Arc<Storage>, msg_rx: MessagingCommandRx) {
         {
             let mut trusted = self.trusted_devices.lock().await;
-            if let Ok(peers) = storage.trusted_peers() {
-                for p in peers {
-                    trusted.insert(
-                        p.device_id,
-                        PeerInfo {
-                            device_id: p.device_id,
-                            device_name: p.device_name,
-                            platform: p
-                                .platform
-                                .unwrap_or(clipboard_proto::types::Platform::Linux),
-                            address: "0.0.0.0:0".parse().unwrap(),
-                        },
-                    );
+            match storage.trusted_peers() {
+                Ok(peers) => {
+                    for p in peers {
+                        trusted.insert(
+                            p.device_id,
+                            PeerInfo {
+                                device_id: p.device_id,
+                                device_name: p.device_name,
+                                platform: p
+                                    .platform
+                                    .unwrap_or(clipboard_proto::types::Platform::Linux),
+                                address: "0.0.0.0:0".parse().unwrap(),
+                            },
+                        );
+                    }
                 }
+                Err(error) => tracing::error!("messaging: failed to load trusted peers: {}", error),
             }
         }
 
@@ -535,26 +538,59 @@ impl MessagingService {
                         ob.entry(device_id).or_default().push(envelope);
                     }
                 }
+                MessagingCommand::Disconnect { device_id } => {
+                    // Remove first: a WebSocket close can await I/O, so it must not
+                    // hold the active-connections registry lock while doing so.
+                    let conn = active.lock().await.remove(&device_id);
+                    if let Some(conn) = conn {
+                        let mut sink = conn.sink.lock().await;
+                        let _ = sink
+                            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                            .await;
+                    }
+                    trusted.lock().await.remove(&device_id);
+                    // Forget is terminal for queued outbound data to this peer.
+                    outbox.lock().await.remove(&device_id);
+                    let _ = event_tx.send(Event::new(
+                        EventSource::MessagingService,
+                        EventType::DeviceDisconnected(DeviceDisconnectedPayload {
+                            device_id,
+                            reason: DisconnectReason::Graceful,
+                        }),
+                    ));
+                    tracing::info!("messaging: disconnected from {}", device_id);
+                }
                 MessagingCommand::ReloadTrusted => {
+                    let peers = match storage.trusted_peers() {
+                        Ok(peers) => peers,
+                        Err(error) => {
+                            tracing::error!("messaging: failed to reload trusted peers: {}", error);
+                            continue;
+                        }
+                    };
                     let mut map = trusted.lock().await;
-                    if let Ok(peers) = storage.trusted_peers() {
-                        for p in peers {
-                            map.entry(p.device_id).or_insert_with(|| PeerInfo {
+                    map.clear();
+                    for p in peers {
+                        map.insert(
+                            p.device_id,
+                            PeerInfo {
                                 device_id: p.device_id,
                                 device_name: p.device_name,
                                 platform: p
                                     .platform
                                     .unwrap_or(clipboard_proto::types::Platform::Linux),
                                 address: "0.0.0.0:0".parse().unwrap(),
-                            });
-                        }
+                            },
+                        );
                     }
                     tracing::debug!("messaging: reloaded trusted peers ({} entries)", map.len());
                     drop(map);
 
+                    let trusted_ids: std::collections::HashSet<Uuid> =
+                        trusted.lock().await.keys().copied().collect();
                     let conns = active.lock().await;
                     for (id, conn) in conns.iter() {
-                        if trusted.lock().await.contains_key(id) {
+                        if trusted_ids.contains(id) {
                             let mut state = conn.session_state.lock().await;
                             if *state == SessionState::Pairing {
                                 *state = SessionState::Trusted;

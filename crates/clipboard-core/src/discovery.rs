@@ -72,13 +72,17 @@ impl DiscoveryService {
 
         let mut roster: HashMap<Uuid, RosterEntry> = HashMap::new();
         let mut interval = time::interval(self.broadcast_interval);
+        // `interval` ticks immediately on creation. Consume that tick so clients
+        // have a chance to subscribe to discovery events after startup rather
+        // than losing the only initial unicast response.
+        interval.tick().await;
         let mut stale_check = time::interval(Duration::from_secs(5));
 
         tracing::info!("discovery: listening on {}", bind_addr);
 
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+            _ = interval.tick() => {
                     self.broadcast_discover(&socket).await;
                     // also send to discovery_targets if configured
                     for target in &self.discovery_targets {

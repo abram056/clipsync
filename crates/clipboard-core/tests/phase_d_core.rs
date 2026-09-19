@@ -24,7 +24,7 @@ fn make_config(
     }
 
     let db_path = std::env::temp_dir().join(format!(
-        "clipboard_sync_test_{}_{}_{}",
+        "clipboard_sync_test_d_{}_{}_{}",
         id,
         std::process::id(),
         uuid::Uuid::new_v4()
@@ -119,27 +119,7 @@ fn wait_for_discovered(
     }
 }
 
-fn spawn_auto_approver(handle: &AppHandle) {
-    let cmd_tx = handle.app_cmd_tx();
-    let event_tx = handle.event_tx();
-    std::thread::spawn(move || {
-        let mut rx = event_tx.subscribe();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => {
-                    if let EventType::PairingRequested(p) = &event.event_type {
-                        let _ = cmd_tx.send(AppCommand::ApprovePairing {
-                            device_id: p.device_id,
-                        });
-                    }
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(100)),
-            }
-        }
-    });
-}
-
-fn setup_paired(
+fn setup_paired_manual(
     handle_a: &AppHandle,
     handle_b: &AppHandle,
 ) -> tokio::sync::broadcast::Receiver<clipboard_proto::event::Event> {
@@ -150,7 +130,24 @@ fn setup_paired(
         .expect("B should discover A via unicast")
         .device_id;
 
-    spawn_auto_approver(handle_a);
+    let cmd_a = handle_a.app_cmd_tx();
+    let ev_a = handle_a.event_tx();
+    let approver_handle = std::thread::spawn(move || {
+        let mut rx = ev_a.subscribe();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if let EventType::PairingRequested(p) = &event.event_type {
+                        let _ = cmd_a.send(AppCommand::ApprovePairing {
+                            device_id: p.device_id,
+                        });
+                        break;
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    });
 
     std::thread::sleep(Duration::from_secs(2));
 
@@ -168,147 +165,143 @@ fn setup_paired(
     });
     assert!(paired_b, "B should see pairing accepted");
 
+    let _ = approver_handle.join();
+
     std::thread::sleep(Duration::from_secs(1));
 
     handle_a.event_tx().subscribe()
 }
 
 #[test]
-fn bidirectional_sync() {
-    let config_a = make_config(1, 60191, 60192, None);
-    let config_b = make_config(2, 60192, 60193, Some("127.0.0.1:60191".parse().unwrap()));
+fn trusted_peers_list_after_pairing() {
+    let config_a = make_config(1, 61191, 61192, None);
+    let config_b = make_config(2, 61192, 61193, Some("127.0.0.1:61191".parse().unwrap()));
 
     let handle_a = start(config_a).expect("start A");
     let handle_b = start(config_b).expect("start B");
 
-    let mut rx_a = setup_paired(&handle_a, &handle_b);
+    setup_paired_manual(&handle_a, &handle_b);
 
-    handle_b.on_clipboard_changed("hello from B");
-
-    let received = wait_for_event(&mut rx_a, Duration::from_secs(5), |et| {
-        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
-    });
-    assert!(received, "A should receive clipboard from B");
-
-    handle_a.on_clipboard_changed("hello from A");
-
-    let mut rx_b = handle_b.event_tx().subscribe();
-    let received = wait_for_event(&mut rx_b, Duration::from_secs(5), |et| {
-        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
-    });
-    assert!(received, "B should receive clipboard from A");
-
-    handle_a.stop();
-    handle_b.stop();
-}
-
-#[test]
-fn no_loop() {
-    let config_a = make_config(3, 60201, 60202, None);
-    let config_b = make_config(4, 60202, 60203, Some("127.0.0.1:60201".parse().unwrap()));
-
-    let handle_a = start(config_a).expect("start A");
-    let handle_b = start(config_b).expect("start B");
-
-    let mut rx_a = setup_paired(&handle_a, &handle_b);
-
-    handle_b.on_clipboard_changed("test content");
-
-    let received = wait_for_event(&mut rx_a, Duration::from_secs(5), |et| {
-        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
-    });
-    assert!(received, "A should receive clipboard");
-
-    std::thread::sleep(Duration::from_secs(2));
-
-    let mut rx_b = handle_b.event_tx().subscribe();
-    let looped = wait_for_event(&mut rx_b, Duration::from_millis(500), |et| {
-        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
-    });
-    assert!(!looped, "B must NOT receive its own content back (no loop)");
-
-    handle_a.stop();
-    handle_b.stop();
-}
-
-#[test]
-fn no_duplicate_local_copy() {
-    let config = make_config(5, 60211, 60212, None);
-    let handle = start(config).expect("start");
-    let mut rx = handle.event_tx().subscribe();
-
-    handle.on_clipboard_changed("same content");
-    std::thread::sleep(Duration::from_millis(300));
-    handle.on_clipboard_changed("same content");
-    std::thread::sleep(Duration::from_millis(300));
-
-    let dups = drain_events(&mut rx, Duration::from_millis(500), |et| {
-        matches!(et, EventType::DuplicateClipboardIgnored(_))
-    });
+    let trusted_a = handle_a.trusted_peers();
+    assert_eq!(trusted_a.len(), 1, "A should have 1 trusted peer");
     assert!(
-        !dups.is_empty(),
-        "should have at least one DuplicateClipboardIgnored"
+        !trusted_a[0].device_name.is_empty(),
+        "trusted peer name should not be empty"
     );
 
-    handle.stop();
-}
-
-#[test]
-fn pause_resume() {
-    let config_a = make_config(6, 60221, 60222, None);
-    let config_b = make_config(7, 60222, 60223, Some("127.0.0.1:60221".parse().unwrap()));
-
-    let handle_a = start(config_a).expect("start A");
-    let handle_b = start(config_b).expect("start B");
-
-    let mut rx_a = setup_paired(&handle_a, &handle_b);
-
-    handle_a.set_paused(true);
-    assert!(handle_a.is_paused());
-
-    handle_b.on_clipboard_changed("while paused");
-    std::thread::sleep(Duration::from_secs(2));
-
-    let received = wait_for_event(&mut rx_a, Duration::from_millis(500), |et| {
-        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
-    });
-    assert!(!received, "paused node should not receive clipboard");
-
-    handle_a.set_paused(false);
-    assert!(!handle_a.is_paused());
+    let trusted_b = handle_b.trusted_peers();
+    assert_eq!(trusted_b.len(), 1, "B should have 1 trusted peer");
 
     handle_a.stop();
     handle_b.stop();
 }
 
 #[test]
-fn history_list_and_restore() {
-    let config = make_config(8, 60231, 60232, None);
+fn history_size_bytes_after_sync() {
+    let config = make_config(3, 61201, 61202, None);
     let handle = start(config).expect("start");
-    let mut rx = handle.event_tx().subscribe();
 
     handle.on_clipboard_changed("first");
     std::thread::sleep(Duration::from_millis(300));
+
     handle.on_clipboard_changed("second");
     std::thread::sleep(Duration::from_millis(300));
 
-    let history = handle.history(10);
-    assert!(
-        history.len() >= 2,
-        "history should have at least 2 entries, got {}",
-        history.len()
-    );
-
-    let entry = &history[0];
-    assert_eq!(entry.content, "second");
-
-    handle.restore_history_entry(entry.clipboard_id);
-    std::thread::sleep(Duration::from_millis(200));
-
-    let restored = wait_for_event(&mut rx, Duration::from_secs(1), |et| {
-        matches!(et, EventType::ClipboardRestored(_))
-    });
-    assert!(restored, "should emit ClipboardRestored");
+    let size = handle.history_size_bytes();
+    assert!(size > 0, "history size should be > 0, got {}", size);
 
     handle.stop();
+}
+
+#[test]
+fn pending_pairing_requests_query() {
+    let config = make_config(4, 61211, 61212, None);
+    let handle = start(config).expect("start");
+
+    let pending = handle.pending_pairing_requests();
+    assert!(
+        pending.is_empty(),
+        "should have no pending pairing requests at start"
+    );
+
+    handle.stop();
+}
+
+#[test]
+fn forget_stops_sync_and_reconnects() {
+    let config_a = make_config(5, 61221, 61222, None);
+    let config_b = make_config(6, 61222, 61223, Some("127.0.0.1:61221".parse().unwrap()));
+
+    let handle_a = start(config_a).expect("start A");
+    let handle_b = start(config_b).expect("start B");
+
+    let mut rx_b = handle_b.event_tx().subscribe();
+
+    let a_id = wait_for_discovered(&mut rx_b, Duration::from_secs(5))
+        .expect("B should discover A")
+        .device_id;
+
+    // B requests pairing, A approves inline via its command channel
+    let cmd_a = handle_a.app_cmd_tx();
+    let ev_a = handle_a.event_tx();
+    std::thread::spawn(move || {
+        let mut rx = ev_a.subscribe();
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                if let EventType::PairingRequested(p) = &event.event_type {
+                    let _ = cmd_a.send(AppCommand::ApprovePairing {
+                        device_id: p.device_id,
+                    });
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    std::thread::sleep(Duration::from_secs(2));
+    handle_b.send_command(AppCommand::RequestPairing { device_id: a_id });
+
+    let mut rx_a = handle_a.event_tx().subscribe();
+    wait_for_event(&mut rx_a, Duration::from_secs(10), |et| {
+        matches!(et, EventType::PairingAccepted(_))
+    });
+    wait_for_event(&mut rx_b, Duration::from_secs(5), |et| {
+        matches!(et, EventType::PairingAccepted(_))
+    });
+
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Confirm pairing
+    assert_eq!(
+        handle_a.trusted_peers().len(),
+        1,
+        "A should have 1 trusted peer after pairing"
+    );
+
+    // A forgets B
+    let b_id = handle_a.trusted_peers().first().unwrap().device_id;
+    handle_a.forget_device(b_id).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+
+    // A should have no trusted peers
+    assert!(
+        handle_a.trusted_peers().is_empty(),
+        "A should have 0 trusted peers after forget"
+    );
+
+    // A copies, B should NOT receive it
+    handle_a.on_clipboard_changed("after forget");
+    std::thread::sleep(Duration::from_secs(3));
+
+    let received = wait_for_event(&mut rx_b, Duration::from_millis(500), |et| {
+        matches!(et, EventType::ClipboardUpdatedFromRemote(_))
+    });
+    assert!(
+        !received,
+        "B should NOT receive clipboard after being forgotten by A"
+    );
+
+    handle_a.stop();
+    handle_b.stop();
 }

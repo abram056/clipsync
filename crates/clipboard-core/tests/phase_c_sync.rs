@@ -119,6 +119,22 @@ fn wait_for_discovered(
     }
 }
 
+/// Every discovery payload produced within `timeout`.
+fn drain_discovered(
+    rx: &mut tokio::sync::broadcast::Receiver<clipboard_proto::event::Event>,
+    timeout: Duration,
+) -> Vec<clipboard_proto::event::DeviceDiscoveredPayload> {
+    drain_events(rx, timeout, |et| {
+        matches!(et, EventType::DeviceDiscovered(_))
+    })
+    .into_iter()
+    .filter_map(|et| match et {
+        EventType::DeviceDiscovered(payload) => Some(payload),
+        _ => None,
+    })
+    .collect()
+}
+
 fn spawn_auto_approver(handle: &AppHandle) {
     let cmd_tx = handle.app_cmd_tx();
     let event_tx = handle.event_tx();
@@ -309,6 +325,223 @@ fn history_list_and_restore() {
         matches!(et, EventType::ClipboardRestored(_))
     });
     assert!(restored, "should emit ClipboardRestored");
+
+    handle.stop();
+}
+
+/// A responder cannot describe the peer that probed it, because DISCOVER
+/// carries neither a listen port nor a platform. Only DISCOVER_RESPONSE may
+/// populate a peer record, and it must carry the advertised values.
+#[test]
+fn discover_reports_peer_listen_port() {
+    let config_a = make_config(9, 60241, 60242, None);
+    let config_b = make_config(10, 60242, 60243, Some("127.0.0.1:60241".parse().unwrap()));
+
+    let a_listen_port = config_a.network.listen_port;
+    let b_listen_port = config_b.network.listen_port;
+    let local_platform = clipboard_proto::message::current_platform();
+
+    let handle_a = start(config_a).expect("start A");
+    let handle_b = start(config_b).expect("start B");
+
+    let mut rx_a = handle_a.event_tx().subscribe();
+    let mut rx_b = handle_b.event_tx().subscribe();
+
+    let discovered_by_b = drain_discovered(&mut rx_b, Duration::from_secs(3));
+    assert!(
+        !discovered_by_b.is_empty(),
+        "B should discover A through its unicast target"
+    );
+    for payload in &discovered_by_b {
+        assert_eq!(
+            payload.port, a_listen_port,
+            "B must record A's advertised listen port"
+        );
+        assert_eq!(payload.ip_address, "127.0.0.1");
+        assert_eq!(
+            payload.platform, local_platform,
+            "B must learn A's platform from the wire"
+        );
+    }
+
+    // A has no discovery target and the two nodes use different discovery
+    // ports, so the only way A could name a peer is the event a responder
+    // used to publish for the bare DISCOVER it answered. Any payload A did
+    // produce must describe B rather than A itself.
+    for payload in &drain_discovered(&mut rx_a, Duration::from_secs(2)) {
+        assert_eq!(
+            payload.port, b_listen_port,
+            "a peer seen by A must describe B, not A"
+        );
+        assert_eq!(payload.ip_address, "127.0.0.1");
+        assert_eq!(payload.platform, local_platform);
+    }
+
+    handle_a.stop();
+    handle_b.stop();
+}
+
+/// The configuration both devices will actually run with: each side points at
+/// the other's discovery port, so discovery and pairing are fully symmetric.
+#[test]
+fn mutual_discovery_connects_both_sides() {
+    let config_a = make_config(11, 60251, 60252, Some("127.0.0.1:60252".parse().unwrap()));
+    let config_b = make_config(12, 60252, 60253, Some("127.0.0.1:60251".parse().unwrap()));
+
+    let a_listen_port = config_a.network.listen_port;
+    let b_listen_port = config_b.network.listen_port;
+
+    let handle_a = start(config_a).expect("start A");
+    let handle_b = start(config_b).expect("start B");
+
+    let mut rx_a = handle_a.event_tx().subscribe();
+    let mut rx_b = handle_b.event_tx().subscribe();
+
+    let seen_by_b =
+        wait_for_discovered(&mut rx_b, Duration::from_secs(5)).expect("B should discover A");
+    assert_eq!(
+        seen_by_b.port, a_listen_port,
+        "B must learn A's listen port"
+    );
+    assert_eq!(seen_by_b.ip_address, "127.0.0.1");
+
+    let seen_by_a = wait_for_discovered(&mut rx_a, Duration::from_secs(5))
+        .expect("A should discover B through its unicast target");
+    assert_eq!(
+        seen_by_a.port, b_listen_port,
+        "A must learn B's listen port"
+    );
+    assert_eq!(seen_by_a.ip_address, "127.0.0.1");
+    assert_ne!(
+        seen_by_a.device_id, seen_by_b.device_id,
+        "each side must have discovered the other device, not itself"
+    );
+
+    // Subscribe before pairing so these receivers observe the connection.
+    let mut rx_a_live = handle_a.event_tx().subscribe();
+    let mut rx_b_live = handle_b.event_tx().subscribe();
+
+    let _ = setup_paired(&handle_a, &handle_b);
+
+    assert!(
+        wait_for_event(&mut rx_a_live, Duration::from_secs(5), |et| {
+            matches!(et, EventType::DeviceConnected(_))
+        }),
+        "A should report an inbound connection"
+    );
+    assert!(
+        wait_for_event(&mut rx_b_live, Duration::from_secs(5), |et| {
+            matches!(et, EventType::DeviceConnected(_))
+        }),
+        "B should report an outbound connection"
+    );
+
+    assert_eq!(handle_a.trusted_peers().unwrap().len(), 1);
+    assert_eq!(handle_b.trusted_peers().unwrap().len(), 1);
+
+    handle_b.on_clipboard_changed("synced after mutual discovery");
+    assert!(
+        wait_for_event(&mut rx_a_live, Duration::from_secs(5), |et| {
+            matches!(et, EventType::ClipboardUpdatedFromRemote(_))
+        }),
+        "A should receive B's clipboard"
+    );
+
+    handle_a.stop();
+    handle_b.stop();
+}
+
+/// Exercise the real `255.255.255.255` broadcast path, which a single test
+/// process cannot cover: two nodes cannot share one discovery port on the
+/// same host, and the broadcast is addressed to the sender's own port.
+///
+/// Run it on two machines on the same LAN at the same time:
+///
+/// ```text
+/// cargo test -p clipboard-core --test phase_c_sync lan_broadcast -- --ignored --nocapture
+/// ```
+///
+/// If your network drops broadcasts, point the two runs at each other
+/// explicitly with `CLIPBOARD_TEST_PEER=<other ip>:<discovery port>`.
+#[test]
+#[ignore = "requires a second machine running this test concurrently"]
+fn lan_broadcast_discovery_manual() {
+    let discovery_port = std::env::var("CLIPBOARD_TEST_DISCOVERY_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48271);
+    let listen_port = std::env::var("CLIPBOARD_TEST_LISTEN_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48272);
+    let peer_target = std::env::var("CLIPBOARD_TEST_PEER")
+        .ok()
+        .and_then(|value| value.parse::<SocketAddr>().ok())
+        .map(|addr| SocketAddr::new(addr.ip(), discovery_port));
+
+    let db_path = std::env::temp_dir().join(format!(
+        "clipboard_sync_lan_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+
+    let mut discovery_targets = Vec::new();
+    if let Some(target) = peer_target {
+        discovery_targets.push(target);
+        println!("unicast discovery target: {}", target);
+    } else {
+        println!(
+            "broadcasting on 255.255.255.255:{} — start the same test on the other machine",
+            discovery_port
+        );
+    }
+
+    let config = AppConfig {
+        network: NetworkConfig {
+            discovery_port,
+            listen_port,
+            discovery_interval_secs: 1,
+            heartbeat_interval_secs: 5,
+            peer_timeout_secs: 15,
+            reconnect_backoff_initial_ms: 1000,
+            reconnect_backoff_max_ms: 60000,
+            discovery_targets,
+        },
+        history: HistoryConfig {
+            max_size_bytes: 2_097_152,
+        },
+        sync: SyncConfig {
+            max_clipboard_bytes: 2_097_152,
+            max_peers: 16,
+            replay_cache_capacity: 1000,
+            replay_cache_ttl_secs: 3600,
+            pairing_timeout_secs: 30,
+            enabled: true,
+        },
+        storage: StorageConfig { path: db_path },
+        platform: PlatformConfig {
+            clipboard_poll_interval_ms: 250,
+        },
+    };
+
+    let handle = start(config).expect("start");
+    let mut rx = handle.event_tx().subscribe();
+
+    let payload = wait_for_discovered(&mut rx, Duration::from_secs(30)).expect(
+        "no peer discovered within 30s: run this test on both machines at the same time, \
+         or set CLIPBOARD_TEST_PEER if the LAN drops broadcasts",
+    );
+
+    println!(
+        "discovered {} (id {}) at {}:{} platform {}",
+        payload.device_name, payload.device_id, payload.ip_address, payload.port, payload.platform
+    );
+    payload
+        .ip_address
+        .parse::<std::net::IpAddr>()
+        .expect("discovered ip should be a usable address");
+    assert_ne!(payload.device_id, uuid::Uuid::nil());
 
     handle.stop();
 }

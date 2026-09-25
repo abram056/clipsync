@@ -159,6 +159,7 @@ pub struct ClipboardRestoredPayload {
 pub struct DeviceDiscoveredPayload {
     pub device_id: Uuid,
     pub device_name: String,
+    pub platform: Platform,
     pub ip_address: String,
     pub port: u16,
 }

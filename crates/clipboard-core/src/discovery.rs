@@ -224,6 +224,7 @@ impl DiscoveryService {
             EventType::DeviceDiscovered(DeviceDiscoveredPayload {
                 device_id: envelope.device_id,
                 device_name: envelope.device_name.clone(),
+                platform: self.platform,
                 ip_address: from_addr.ip().to_string(),
                 port: self.listen_port,
             }),
@@ -266,6 +267,10 @@ impl DiscoveryService {
             EventType::DeviceDiscovered(DeviceDiscoveredPayload {
                 device_id: envelope.device_id,
                 device_name: envelope.device_name.clone(),
+                platform: match &envelope.payload {
+                    Payload::DiscoverResponse(response) => response.platform,
+                    _ => self.platform,
+                },
                 ip_address: from_addr.ip().to_string(),
                 port: ws_port,
             }),

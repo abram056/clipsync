@@ -16,9 +16,16 @@ pub struct AppHandle {
     runtime: tokio::runtime::Runtime,
     pub(crate) app_cmd_tx: AppCommandTx,
     event_tx: broadcast::Sender<Event>,
+    device_id: uuid::Uuid,
+    device_name: String,
 }
 
 impl AppHandle {
+    /// The identity this process was assigned in local storage.
+    pub fn identity(&self) -> (uuid::Uuid, String) {
+        (self.device_id, self.device_name.clone())
+    }
+
     pub fn next_event(&self) -> Option<Event> {
         let mut rx = self.event_tx.subscribe();
         rx.try_recv().ok()
@@ -227,6 +234,8 @@ pub fn start(config: AppConfig) -> Result<AppHandle, clipboard_proto::error::Err
         runtime,
         app_cmd_tx: channels.app_cmd_tx,
         event_tx: channels.event_tx,
+        device_id,
+        device_name,
     };
 
     Ok(app_handle)

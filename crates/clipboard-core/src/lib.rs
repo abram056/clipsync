@@ -12,8 +12,11 @@ pub use config::AppConfig;
 pub use runtime::{start, AppHandle};
 pub use storage::Storage;
 
+use std::collections::HashSet;
+use std::io::BufRead;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::config::{HistoryConfig, NetworkConfig, PlatformConfig, StorageConfig, SyncConfig};
 
@@ -25,6 +28,8 @@ pub struct HarnessConfig {
     pub db_path: PathBuf,
     pub auto_approve: bool,
     pub auto_pair: bool,
+    pub clipboard: Vec<String>,
+    pub read_stdin: bool,
 }
 
 impl HarnessConfig {
@@ -37,6 +42,8 @@ impl HarnessConfig {
         let mut db_path = PathBuf::from("/tmp/clipboard-sync-test");
         let mut auto_approve = false;
         let mut auto_pair = false;
+        let mut clipboard: Vec<String> = Vec::new();
+        let mut read_stdin = false;
 
         let mut i = 1;
         while i < args.len() {
@@ -67,6 +74,13 @@ impl HarnessConfig {
                 "--auto-pair" => {
                     auto_pair = true;
                 }
+                "--clipboard" => {
+                    i += 1;
+                    clipboard.push(args[i].clone());
+                }
+                "--stdin" => {
+                    read_stdin = true;
+                }
                 _ => {}
             }
             i += 1;
@@ -82,6 +96,8 @@ impl HarnessConfig {
             db_path,
             auto_approve,
             auto_pair,
+            clipboard,
+            read_stdin,
         }
     }
 
@@ -123,6 +139,41 @@ impl HarnessConfig {
     }
 }
 
+/// A single-line rendering of clipboard content for log output.
+fn preview(content: &str) -> String {
+    const MAX: usize = 120;
+    if content.chars().count() <= MAX {
+        return content.to_string();
+    }
+    let truncated: String = content.chars().take(MAX).collect();
+    format!("{}...", truncated)
+}
+
+/// Hand queued clipboard text to the core once a trusted peer is connected.
+///
+/// The core records a content hash when it observes a local update, even when
+/// no peer is eligible to receive it. A premature send would therefore store
+/// the text without delivering it and every later attempt would be
+/// deduplicated as a duplicate, so the queue is only drained when a connected
+/// peer is trusted.
+fn flush_clipboard(
+    pending: &mut Vec<String>,
+    connected: &HashSet<uuid::Uuid>,
+    trusted: &HashSet<uuid::Uuid>,
+    app_cmd_tx: &crate::channels::AppCommandTx,
+) {
+    if pending.is_empty() || !connected.iter().any(|id| trusted.contains(id)) {
+        return;
+    }
+    for content in pending.drain(..) {
+        tracing::info!("sending clipboard: {}", preview(&content));
+        let _ = app_cmd_tx.send(crate::channels::AppCommand::ClipboardChanged {
+            content,
+            content_type: "text/plain".to_string(),
+        });
+    }
+}
+
 pub fn run_harness(config: HarnessConfig) {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -139,11 +190,16 @@ pub fn run_harness(config: HarnessConfig) {
     let auto_pair = config.auto_pair;
     let handle = start(app_config).expect("failed to start");
 
+    let (self_device_id, self_device_name) = handle.identity();
     tracing::info!(
-        "Node {} started (listen: {}, discovery: {})",
+        "Node {} started: device {} ({}) platform {} listen {} discovery {} db {}",
         node_id_for_log,
+        self_device_id,
+        self_device_name,
+        clipboard_proto::message::current_platform(),
         listen_port,
-        discovery_port
+        discovery_port,
+        config.db_path.display()
     );
 
     let event_tx = handle.event_tx();
@@ -151,71 +207,148 @@ pub fn run_harness(config: HarnessConfig) {
     let node_id = node_id_for_log.clone();
     let app_cmd_tx = handle.app_cmd_tx.clone();
 
-    std::thread::spawn(move || loop {
-        match event_rx.try_recv() {
-            Ok(event) => match &event.event_type {
-                clipboard_proto::event::EventType::DeviceDiscovered(p) => {
-                    tracing::info!(
-                        "[{}] Discovered: {} ({}) at {}",
-                        node_id,
-                        p.device_name,
-                        p.device_id,
-                        p.ip_address
-                    );
-                    if auto_pair {
-                        tracing::info!("[{}] Auto-pairing with {}", node_id, p.device_id);
-                        let _ = app_cmd_tx.send(crate::channels::AppCommand::RequestPairing {
-                            device_id: p.device_id,
-                        });
+    // Clipboard text is only handed to the core once a trusted peer is
+    // connected: the core records a content hash on the local update itself,
+    // so an attempt made before pairing would be stored without any eligible
+    // target and every later attempt would then be deduplicated.
+    let pending_clipboard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(config.clipboard.clone()));
+    if !config.clipboard.is_empty() {
+        tracing::info!(
+            "[{}] queued {} clipboard payload(s), sent once a trusted peer connects",
+            node_id,
+            config.clipboard.len()
+        );
+    }
+
+    let mut trusted_ids: HashSet<uuid::Uuid> = handle
+        .trusted_peers()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|peer| peer.device_id)
+        .collect();
+
+    if config.read_stdin {
+        tracing::info!("[{}] reading clipboard lines from stdin", node_id);
+        let pending = pending_clipboard.clone();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(text) if !text.is_empty() => pending.lock().unwrap().push(text),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!("stdin closed: {}", error);
+                        break;
                     }
                 }
-                clipboard_proto::event::EventType::PairingRequested(p) => {
-                    tracing::info!(
-                        "[{}] Pairing request from {} ({})",
-                        node_id,
-                        p.device_name,
-                        p.device_id
-                    );
-                    if auto_approve {
-                        tracing::info!("[{}] Auto-approving {}", node_id, p.device_id);
-                        let _ = app_cmd_tx.send(crate::channels::AppCommand::ApprovePairing {
-                            device_id: p.device_id,
-                        });
-                    }
-                }
-                clipboard_proto::event::EventType::PairingAccepted(p) => {
-                    tracing::info!("[{}] Paired with {}", node_id, p.device_id);
-                }
-                clipboard_proto::event::EventType::DeviceConnected(p) => {
-                    tracing::info!(
-                        "[{}] Connected: {} ({:?})",
-                        node_id,
-                        p.device_name,
-                        p.connection_type
-                    );
-                }
-                clipboard_proto::event::EventType::DeviceDisconnected(p) => {
-                    tracing::info!(
-                        "[{}] Disconnected: {} ({:?})",
-                        node_id,
-                        p.device_id,
-                        p.reason
-                    );
-                }
-                clipboard_proto::event::EventType::DeviceConnectionFailed(p) => {
-                    tracing::warn!(
-                        "[{}] Connection failed: {} - {}",
-                        node_id,
-                        p.device_id,
-                        p.error
-                    );
-                }
-                _ => {}
-            },
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(_) => break,
+        });
+    }
+
+    let mut connected: HashSet<uuid::Uuid> = HashSet::new();
+    let thread_pending = pending_clipboard.clone();
+    std::thread::spawn(move || {
+        let mut last_flush_check = std::time::Instant::now();
+        loop {
+            match event_rx.try_recv() {
+                Ok(event) => match &event.event_type {
+                    clipboard_proto::event::EventType::DeviceDiscovered(p) => {
+                        tracing::info!(
+                            "[{}] Discovered: {} ({}) at {}",
+                            node_id,
+                            p.device_name,
+                            p.device_id,
+                            p.ip_address
+                        );
+                        if auto_pair && !trusted_ids.contains(&p.device_id) {
+                            tracing::info!("[{}] Auto-pairing with {}", node_id, p.device_id);
+                            let _ = app_cmd_tx.send(crate::channels::AppCommand::RequestPairing {
+                                device_id: p.device_id,
+                            });
+                        }
+                    }
+                    clipboard_proto::event::EventType::PairingRequested(p) => {
+                        tracing::info!(
+                            "[{}] Pairing request from {} ({})",
+                            node_id,
+                            p.device_name,
+                            p.device_id
+                        );
+                        if auto_approve {
+                            tracing::info!("[{}] Auto-approving {}", node_id, p.device_id);
+                            let _ = app_cmd_tx.send(crate::channels::AppCommand::ApprovePairing {
+                                device_id: p.device_id,
+                            });
+                        }
+                    }
+                    clipboard_proto::event::EventType::PairingAccepted(p) => {
+                        tracing::info!("[{}] Paired with {}", node_id, p.device_id);
+                        trusted_ids.insert(p.device_id);
+                    }
+                    clipboard_proto::event::EventType::PairingRejected(p) => {
+                        tracing::info!(
+                            "[{}] Pairing rejected by {} ({:?})",
+                            node_id,
+                            p.device_id,
+                            p.reason
+                        );
+                    }
+                    clipboard_proto::event::EventType::DeviceConnected(p) => {
+                        tracing::info!(
+                            "[{}] Connected: {} ({:?})",
+                            node_id,
+                            p.device_name,
+                            p.connection_type
+                        );
+                        connected.insert(p.device_id);
+                    }
+                    clipboard_proto::event::EventType::DeviceDisconnected(p) => {
+                        tracing::info!(
+                            "[{}] Disconnected: {} ({:?})",
+                            node_id,
+                            p.device_id,
+                            p.reason
+                        );
+                        connected.remove(&p.device_id);
+                    }
+                    clipboard_proto::event::EventType::DeviceConnectionFailed(p) => {
+                        tracing::warn!(
+                            "[{}] Connection failed: {} - {}",
+                            node_id,
+                            p.device_id,
+                            p.error
+                        );
+                    }
+                    clipboard_proto::event::EventType::ClipboardUpdatedFromRemote(p) => {
+                        tracing::info!(
+                            "[{}] Received clipboard from {}: {}",
+                            node_id,
+                            p.origin_device_id,
+                            preview(&p.content)
+                        );
+                    }
+                    clipboard_proto::event::EventType::SyncCompleted(p) => {
+                        tracing::info!(
+                            "[{}] Clipboard {} delivered to {} device(s)",
+                            node_id,
+                            p.clipboard_id,
+                            p.successful_devices.len()
+                        );
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+
+            if last_flush_check.elapsed() >= std::time::Duration::from_secs(1) {
+                last_flush_check = std::time::Instant::now();
+                if let Ok(mut pending) = thread_pending.lock() {
+                    flush_clipboard(&mut pending, &connected, &trusted_ids, &app_cmd_tx);
+                }
+            }
         }
     });
 

@@ -363,7 +363,6 @@ impl MessagingService {
 
         let mut _last_pong = tokio::time::Instant::now();
         loop {
-            let current_state = session_state_handle.lock().await.clone();
             tokio::select! {
                 msg = ws_stream.next() => {
                     match msg {
@@ -377,7 +376,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &current_state, peer_device_id, &inbound_tx,
+                                env, &session_state_handle, peer_device_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
@@ -390,7 +389,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &current_state, peer_device_id, &inbound_tx,
+                                env, &session_state_handle, peer_device_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
@@ -436,7 +435,7 @@ impl MessagingService {
 
     async fn handle_message(
         env: Envelope,
-        session_state: &SessionState,
+        session_state: &Arc<Mutex<SessionState>>,
         peer_device_id: Uuid,
         inbound_tx: &InboundEnvelopeTx,
     ) {
@@ -457,7 +456,12 @@ impl MessagingService {
                 }
             }
             _ => {
-                if *session_state == SessionState::Pairing {
+                // Read the session state when the message arrives rather than
+                // caching it before blocking on the socket: a promotion to
+                // Trusted that happens while the loop is idle must be visible
+                // to the very next message, or that message is dropped.
+                let state = session_state.lock().await.clone();
+                if state == SessionState::Pairing {
                     match &env.message_type {
                         MessageType::PairingRequest
                         | MessageType::PairingAccept
@@ -751,7 +755,6 @@ impl MessagingService {
         let peer_timeout = Duration::from_secs(45);
         let mut _last_pong = tokio::time::Instant::now();
         loop {
-            let current_state = session_state_handle.lock().await.clone();
             tokio::select! {
                 msg = ws_stream.next() => {
                     match msg {
@@ -765,7 +768,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &current_state, peer_id, &inbound_tx,
+                                env, &session_state_handle, peer_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
@@ -778,7 +781,7 @@ impl MessagingService {
                             };
                             _last_pong = tokio::time::Instant::now();
                             Self::handle_message(
-                                env, &current_state, peer_id, &inbound_tx,
+                                env, &session_state_handle, peer_id, &inbound_tx,
                             ).await;
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
@@ -847,4 +850,55 @@ async fn send_envelope(sink: &mut WsSink, env: &Envelope) -> Result<(), ()> {
     ))
     .await
     .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channels::inbound_envelope_channel;
+    use chrono::Utc;
+    use clipboard_proto::message::ClipboardUpdatePayload;
+
+    fn clipboard_update(from: Uuid) -> Envelope {
+        Envelope::build(
+            MessageType::ClipboardUpdate,
+            from,
+            "peer".into(),
+            Payload::ClipboardUpdate(ClipboardUpdatePayload {
+                clipboard_id: Uuid::new_v4(),
+                origin_device_id: from,
+                content_type: "text/plain".into(),
+                content: "hello".into(),
+                content_hash: "hash".into(),
+                creation_timestamp: Utc::now(),
+            }),
+        )
+    }
+
+    // Regression: a promotion to Trusted that happens while the connection
+    // loop is idle must be visible to the very next message. Reading the
+    // session state before blocking on the socket (the old snapshot-at-loop-
+    // -top pattern) judged that message against Pairing and dropped it.
+    #[tokio::test]
+    async fn session_state_is_read_when_the_message_arrives() {
+        let session_state = Arc::new(Mutex::new(SessionState::Pairing));
+        let (inbound_tx, mut inbound_rx) = inbound_envelope_channel();
+        let peer = Uuid::new_v4();
+
+        MessagingService::handle_message(clipboard_update(peer), &session_state, peer, &inbound_tx)
+            .await;
+        assert!(
+            inbound_rx.try_recv().is_err(),
+            "clipboard update must be rejected while the session is Pairing"
+        );
+
+        *session_state.lock().await = SessionState::Trusted;
+
+        MessagingService::handle_message(clipboard_update(peer), &session_state, peer, &inbound_tx)
+            .await;
+        let forwarded = inbound_rx
+            .try_recv()
+            .expect("clipboard update must be accepted after promotion");
+        assert_eq!(forwarded.device_id, peer);
+    }
 }

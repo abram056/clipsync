@@ -607,7 +607,9 @@ impl Coordinator {
                 };
                 self.discovered_peers.insert(p.device_id, peer);
 
-                if self.storage.is_trusted(&p.device_id).unwrap_or(false) {
+                if self.storage.is_trusted(&p.device_id).unwrap_or(false)
+                    && !self.connected_peers.contains(&p.device_id)
+                {
                     let peer = self.discovered_peers.get(&p.device_id).cloned().unwrap();
                     tracing::info!(
                         "coordinator: auto-connecting to trusted peer {}",

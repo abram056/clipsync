@@ -218,17 +218,58 @@ impl DiscoveryService {
             let _ = socket.send_to(&data, from_addr).await;
         }
 
-        // Also emit DeviceDiscovered for the sender
-        let _ = self.event_tx.send(Event::new(
-            EventSource::DiscoveryService,
-            EventType::DeviceDiscovered(DeviceDiscoveredPayload {
-                device_id: envelope.device_id,
-                device_name: envelope.device_name.clone(),
-                platform: self.platform,
-                ip_address: from_addr.ip().to_string(),
-                port: self.listen_port,
-            }),
-        ));
+        // No DeviceDiscovered here: a DISCOVER carries neither the requester's
+        // listen port nor its platform, so the only thing this side could
+        // report is its own values. The requester learns about us from the
+        // response above; we learn about the requester when they answer one of
+        // our DISCOVER broadcasts.
+        tracing::debug!("discovery: answered DISCOVER from {}", from_addr);
+    }
+
+    /// Build the peer record described by a `DISCOVER_RESPONSE`.
+    ///
+    /// The responder is the only party that knows its own WebSocket listen
+    /// port, so this is the authoritative source for a peer's address and
+    /// platform.
+    fn peer_from_response(
+        &self,
+        envelope: &Envelope,
+        from_addr: SocketAddr,
+    ) -> Option<(PeerInfo, DeviceDiscoveredPayload)> {
+        let response = match &envelope.payload {
+            Payload::DiscoverResponse(response) => response,
+            _ => {
+                tracing::warn!("discovery: DISCOVER_RESPONSE with wrong payload variant");
+                return None;
+            }
+        };
+
+        if response.protocol_version != PROTOCOL_VERSION {
+            tracing::debug!(
+                "discovery: ignoring DISCOVER_RESPONSE with unsupported version {}",
+                response.protocol_version
+            );
+            return None;
+        }
+
+        let address = SocketAddr::new(from_addr.ip(), response.listening_port);
+
+        let peer = PeerInfo {
+            device_id: envelope.device_id,
+            device_name: envelope.device_name.clone(),
+            platform: response.platform,
+            address,
+        };
+
+        let payload = DeviceDiscoveredPayload {
+            device_id: envelope.device_id,
+            device_name: envelope.device_name.clone(),
+            platform: response.platform,
+            ip_address: from_addr.ip().to_string(),
+            port: response.listening_port,
+        };
+
+        Some((peer, payload))
     }
 
     fn handle_discover_response(
@@ -237,43 +278,13 @@ impl DiscoveryService {
         from_addr: SocketAddr,
         roster: &mut HashMap<Uuid, RosterEntry>,
     ) {
-        let ws_port = match &envelope.payload {
-            Payload::DiscoverResponse(dr) => {
-                if dr.protocol_version != PROTOCOL_VERSION {
-                    tracing::debug!(
-                        "discovery: ignoring DISCOVER_RESPONSE with unsupported version {}",
-                        dr.protocol_version
-                    );
-                    return;
-                }
-                dr.listening_port
-            }
-            _ => {
-                tracing::warn!("discovery: DISCOVER_RESPONSE with wrong payload variant");
-                return;
-            }
-        };
-
-        let addr = SocketAddr::new(from_addr.ip(), ws_port);
-        let peer = PeerInfo {
-            device_id: envelope.device_id,
-            device_name: envelope.device_name.clone(),
-            platform: clipboard_proto::types::Platform::Linux,
-            address: addr,
+        let Some((peer, payload)) = self.peer_from_response(envelope, from_addr) else {
+            return;
         };
 
         let _ = self.event_tx.send(Event::new(
             EventSource::DiscoveryService,
-            EventType::DeviceDiscovered(DeviceDiscoveredPayload {
-                device_id: envelope.device_id,
-                device_name: envelope.device_name.clone(),
-                platform: match &envelope.payload {
-                    Payload::DiscoverResponse(response) => response.platform,
-                    _ => self.platform,
-                },
-                ip_address: from_addr.ip().to_string(),
-                port: ws_port,
-            }),
+            EventType::DeviceDiscovered(payload),
         ));
 
         roster.insert(
@@ -372,5 +383,185 @@ mod tests {
             }),
         );
         assert_eq!(envelope.device_id, id);
+    }
+
+    /// A service that is never spawned, so the helpers under test can be
+    /// exercised without binding a UDP port.
+    fn unspawned_service() -> DiscoveryService {
+        let (event_tx, _event_rx) = broadcast::channel(8);
+        DiscoveryService {
+            self_device_id: Uuid::new_v4(),
+            self_device_name: "self".to_string(),
+            discovery_port: 48271,
+            listen_port: 48272,
+            platform: clipboard_proto::types::Platform::Linux,
+            broadcast_interval: Duration::from_secs(3600),
+            peer_timeout: Duration::from_secs(45),
+            discovery_targets: Vec::new(),
+            event_tx,
+        }
+    }
+
+    fn discover_response(
+        platform: clipboard_proto::types::Platform,
+        protocol_version: u32,
+        listening_port: u16,
+    ) -> Envelope {
+        Envelope::build(
+            MessageType::DiscoverResponse,
+            Uuid::new_v4(),
+            "peer".to_string(),
+            Payload::DiscoverResponse(DiscoverResponsePayload {
+                protocol_version,
+                listening_port,
+                platform,
+            }),
+        )
+    }
+
+    #[test]
+    fn payload_from_response_uses_peer_port_and_platform() {
+        let svc = unspawned_service();
+        let from_addr: SocketAddr = "192.168.1.50:48271".parse().unwrap();
+
+        for platform in [
+            clipboard_proto::types::Platform::Linux,
+            clipboard_proto::types::Platform::Android,
+            clipboard_proto::types::Platform::Windows,
+            clipboard_proto::types::Platform::MacOS,
+        ] {
+            let envelope = discover_response(platform, PROTOCOL_VERSION, 49001);
+            let (peer, payload) = svc
+                .peer_from_response(&envelope, from_addr)
+                .expect("supported DISCOVER_RESPONSE should describe a peer");
+
+            assert_eq!(payload.port, 49001, "port must come from the response");
+            assert_eq!(payload.ip_address, "192.168.1.50");
+            assert_eq!(payload.platform, platform);
+            assert_eq!(payload.device_id, envelope.device_id);
+            assert_eq!(payload.device_name, "peer");
+            assert_eq!(
+                peer.address,
+                "192.168.1.50:49001".parse::<SocketAddr>().unwrap(),
+                "peer address must combine the source ip with the advertised port"
+            );
+            assert_eq!(peer.platform, platform);
+        }
+    }
+
+    #[test]
+    fn response_with_unsupported_version_is_ignored() {
+        let svc = unspawned_service();
+        let from_addr: SocketAddr = "192.168.1.50:48271".parse().unwrap();
+        let envelope = discover_response(
+            clipboard_proto::types::Platform::Linux,
+            PROTOCOL_VERSION + 1,
+            49001,
+        );
+        assert!(svc.peer_from_response(&envelope, from_addr).is_none());
+    }
+
+    #[test]
+    fn response_with_wrong_payload_variant_is_ignored() {
+        let svc = unspawned_service();
+        let from_addr: SocketAddr = "192.168.1.50:48271".parse().unwrap();
+        let envelope = Envelope::build(
+            MessageType::DiscoverResponse,
+            Uuid::new_v4(),
+            "peer".to_string(),
+            Payload::Discover(DiscoverPayload {
+                protocol_version: PROTOCOL_VERSION,
+            }),
+        );
+        assert!(svc.peer_from_response(&envelope, from_addr).is_none());
+    }
+
+    /// An ephemeral port outside the range the integration tests reserve for
+    /// themselves, so a concurrently running test binary cannot collide.
+    fn free_udp_port() -> u16 {
+        for _ in 0..20 {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe socket");
+            let port = socket.local_addr().expect("probe address").port();
+            if !(60000..=63000).contains(&port) {
+                return port;
+            }
+        }
+        panic!("could not find a free discovery port");
+    }
+
+    #[tokio::test]
+    async fn discover_datagram_is_answered_without_emitting_device_discovered() {
+        let discovery_port = free_udp_port();
+
+        let mut config = AppConfig::default();
+        config.network.discovery_port = discovery_port;
+        config.network.discovery_interval_secs = 3600;
+
+        let self_device_id = Uuid::new_v4();
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let handle = DiscoveryService::spawn(
+            &config,
+            self_device_id,
+            "self".to_string(),
+            clipboard_proto::types::Platform::Linux,
+            event_tx,
+        );
+
+        let socket = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind test socket");
+        let discover = Envelope::build(
+            MessageType::Discover,
+            Uuid::new_v4(),
+            "peer".to_string(),
+            Payload::Discover(DiscoverPayload {
+                protocol_version: PROTOCOL_VERSION,
+            }),
+        );
+        let data = discover.to_bytes().expect("serialize DISCOVER");
+
+        // The service binds asynchronously, so keep offering DISCOVER until it
+        // answers rather than sending once into a race.
+        let mut buf = vec![0u8; 4096];
+        let mut response: Option<Envelope> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while response.is_none() {
+            let _ = socket.send_to(&data, ("127.0.0.1", discovery_port)).await;
+            match tokio::time::timeout(Duration::from_millis(300), socket.recv_from(&mut buf)).await
+            {
+                Ok(Ok((n, _))) => response = Envelope::from_bytes(&buf[..n]).ok(),
+                _ => assert!(
+                    std::time::Instant::now() < deadline,
+                    "DISCOVER went unanswered on 127.0.0.1:{}",
+                    discovery_port
+                ),
+            }
+        }
+
+        let response = response.expect("malformed DISCOVER_RESPONSE");
+        assert_eq!(response.message_type, MessageType::DiscoverResponse);
+        assert_eq!(
+            response.device_id, self_device_id,
+            "response must be attributed to the answering service"
+        );
+        match response.payload {
+            Payload::DiscoverResponse(dr) => {
+                assert_eq!(dr.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(dr.listening_port, config.network.listen_port);
+                assert_eq!(dr.platform, clipboard_proto::types::Platform::Linux);
+            }
+            other => panic!("expected DISCOVER_RESPONSE, got {:?}", other),
+        }
+
+        // Give the service a chance to emit anything it was going to emit.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(event) = event_rx.try_recv() {
+            assert!(
+                !matches!(event.event_type, EventType::DeviceDiscovered(_)),
+                "answering a DISCOVER must not report a peer"
+            );
+        }
+
+        handle.abort();
     }
 }

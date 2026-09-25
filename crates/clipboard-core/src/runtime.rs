@@ -215,6 +215,7 @@ pub fn start(config: AppConfig) -> Result<AppHandle, clipboard_proto::error::Err
         &config,
         device_id,
         device_name.clone(),
+        platform,
         storage.clone(),
         channels.msg_cmd_tx.clone(),
         channels.event_tx.clone(),

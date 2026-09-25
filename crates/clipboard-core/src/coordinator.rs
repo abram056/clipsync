@@ -54,6 +54,7 @@ impl Coordinator {
         config: &AppConfig,
         self_device_id: Uuid,
         self_device_name: String,
+        platform: clipboard_proto::types::Platform,
         storage: Arc<Storage>,
         msg_tx: MessagingCommandTx,
         event_tx: broadcast::Sender<Event>,
@@ -63,7 +64,7 @@ impl Coordinator {
         let pairing = PairingManager::new(
             self_device_id,
             self_device_name.clone(),
-            clipboard_proto::types::Platform::Linux,
+            platform,
             storage.clone(),
             msg_tx.clone(),
             event_tx.clone(),
@@ -599,7 +600,7 @@ impl Coordinator {
                 let peer = PeerInfo {
                     device_id: p.device_id,
                     device_name: p.device_name,
-                    platform: clipboard_proto::types::Platform::Linux,
+                    platform: p.platform,
                     address: format!("{}:{}", p.ip_address, p.port)
                         .parse()
                         .unwrap_or_else(|_| "127.0.0.1:48272".parse().unwrap()),

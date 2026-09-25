@@ -38,7 +38,7 @@ pub fn run(handle: AppHandle, poll_interval_ms: u64) -> Result<(), Box<dyn std::
             name: peer.device_name.clone(),
             platform: peer
                 .platform
-                .unwrap_or(clipboard_proto::types::Platform::Linux),
+                .unwrap_or_else(clipboard_proto::message::current_platform),
             discovered: false,
             last_seen: None,
             connected: false,
@@ -262,7 +262,7 @@ fn handle_core_event(
                 state.devices.push(DeviceRow {
                     device_id: p.device_id,
                     name: p.device_name.clone(),
-                    platform: clipboard_proto::types::Platform::Linux,
+                    platform: p.platform,
                     discovered: true,
                     last_seen: Some(Instant::now()),
                     connected: true,
@@ -317,7 +317,7 @@ fn handle_core_event(
                         name: peer.device_name.clone(),
                         platform: peer
                             .platform
-                            .unwrap_or(clipboard_proto::types::Platform::Linux),
+                            .unwrap_or_else(clipboard_proto::message::current_platform),
                         discovered: false,
                         last_seen: None,
                         connected: false,

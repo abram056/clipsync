@@ -9,8 +9,8 @@ use clipboard_proto::event::{
     DeviceDisconnectedPayload, DisconnectReason, Event, EventSource, EventType,
 };
 use clipboard_proto::message::{
-    Envelope, HelloAckPayload, HelloPayload, MessageType, Payload, MAX_CLIPBOARD_SIZE,
-    PROTOCOL_VERSION,
+    current_platform, Envelope, HelloAckPayload, HelloPayload, MessageType, Payload,
+    MAX_CLIPBOARD_SIZE, PROTOCOL_VERSION,
 };
 use clipboard_proto::types::PeerInfo;
 use futures_util::{SinkExt, StreamExt};
@@ -119,9 +119,7 @@ impl MessagingService {
                             PeerInfo {
                                 device_id: p.device_id,
                                 device_name: p.device_name,
-                                platform: p
-                                    .platform
-                                    .unwrap_or(clipboard_proto::types::Platform::Linux),
+                                platform: p.platform.unwrap_or_else(current_platform),
                                 address: "0.0.0.0:0".parse().unwrap(),
                             },
                         );
@@ -576,9 +574,7 @@ impl MessagingService {
                             PeerInfo {
                                 device_id: p.device_id,
                                 device_name: p.device_name,
-                                platform: p
-                                    .platform
-                                    .unwrap_or(clipboard_proto::types::Platform::Linux),
+                                platform: p.platform.unwrap_or_else(current_platform),
                                 address: "0.0.0.0:0".parse().unwrap(),
                             },
                         );

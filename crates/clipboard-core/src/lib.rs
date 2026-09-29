@@ -39,7 +39,7 @@ impl HarnessConfig {
         let mut listen_port = 48272u16;
         let mut discovery_port = 48271u16;
         let mut peer_addr: Option<SocketAddr> = None;
-        let mut db_path = PathBuf::from("/tmp/clipboard-sync-test");
+        let mut db_path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("clipboard-sync");
         let mut auto_approve = false;
         let mut auto_pair = false;
         let mut clipboard: Vec<String> = Vec::new();

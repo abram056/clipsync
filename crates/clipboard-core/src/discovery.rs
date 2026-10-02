@@ -327,9 +327,12 @@ impl DiscoveryService {
 mod tests {
     use super::*;
 
+    /// Drives the real staleness check: an entry older than the configured
+    /// peer timeout must be dropped from the roster.
     #[test]
     fn roster_staleness() {
-        let timeout = Duration::from_millis(50);
+        let mut service = unspawned_service();
+        service.peer_timeout = Duration::from_millis(50);
         let mut roster: HashMap<Uuid, RosterEntry> = HashMap::new();
         let id = Uuid::new_v4();
         roster.insert(
@@ -344,14 +347,21 @@ mod tests {
                 last_seen: Instant::now() - Duration::from_millis(100),
             },
         );
-        let before = roster.len();
-        roster.retain(|_, entry| Instant::now().duration_since(entry.last_seen) < timeout);
-        assert_eq!(roster.len(), before - 1);
+
+        assert!(
+            service.check_staleness(&mut roster),
+            "removing an entry must be reported"
+        );
+        assert!(
+            roster.is_empty(),
+            "the stale entry must be dropped from the roster"
+        );
     }
 
+    /// An entry seen within the timeout must survive the check.
     #[test]
     fn roster_keeps_fresh() {
-        let timeout = Duration::from_secs(45);
+        let service = unspawned_service();
         let mut roster: HashMap<Uuid, RosterEntry> = HashMap::new();
         let id = Uuid::new_v4();
         roster.insert(
@@ -366,9 +376,12 @@ mod tests {
                 last_seen: Instant::now(),
             },
         );
-        let before = roster.len();
-        roster.retain(|_, entry| Instant::now().duration_since(entry.last_seen) < timeout);
-        assert_eq!(roster.len(), before);
+
+        assert!(
+            !service.check_staleness(&mut roster),
+            "a fresh entry must not be reported as removed"
+        );
+        assert_eq!(roster.len(), 1, "the fresh entry must be kept");
     }
 
     #[test]

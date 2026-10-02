@@ -22,10 +22,24 @@ use crate::storage::Storage;
 
 const TIMESTAMP_SKEW_SECS: i64 = 300;
 
-const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+/// The documented backoff ladder between the configured initial delay and
+/// the configured cap: 1 s (initial) → 5 s → 15 s → 60 s (cap).
 const RECONNECT_STEP_1: Duration = Duration::from_secs(5);
 const RECONNECT_STEP_2: Duration = Duration::from_secs(15);
-const RECONNECT_CAP: Duration = Duration::from_secs(60);
+
+/// Advance the backoff ladder one step, clamped to the configured cap.
+/// The initial delay is applied when the retry is first scheduled, so it is
+/// not part of the ladder itself.
+fn next_backoff_delay(current: Duration, cap: Duration) -> Duration {
+    let stepped = if current < RECONNECT_STEP_1 {
+        RECONNECT_STEP_1
+    } else if current < RECONNECT_STEP_2 {
+        RECONNECT_STEP_2
+    } else {
+        cap
+    };
+    stepped.min(cap)
+}
 
 #[derive(Debug, Clone)]
 struct ReconnectEntry {
@@ -45,6 +59,8 @@ pub struct Coordinator {
     reconnect_queue: std::collections::HashMap<Uuid, ReconnectEntry>,
     connected_peers: HashSet<Uuid>,
     max_clipboard_bytes: usize,
+    reconnect_initial: Duration,
+    reconnect_cap: Duration,
     paused: bool,
 }
 
@@ -95,6 +111,8 @@ impl Coordinator {
             reconnect_queue: std::collections::HashMap::new(),
             connected_peers: HashSet::new(),
             max_clipboard_bytes: config.sync.max_clipboard_bytes,
+            reconnect_initial: Duration::from_millis(config.network.reconnect_backoff_initial_ms),
+            reconnect_cap: Duration::from_millis(config.network.reconnect_backoff_max_ms),
             paused,
         };
 
@@ -636,8 +654,8 @@ impl Coordinator {
                     self.reconnect_queue.insert(
                         p.device_id,
                         ReconnectEntry {
-                            next_attempt: Instant::now() + RECONNECT_INITIAL,
-                            current_delay: RECONNECT_INITIAL,
+                            next_attempt: Instant::now() + self.reconnect_initial,
+                            current_delay: self.reconnect_initial,
                         },
                     );
                 }
@@ -684,13 +702,10 @@ impl Coordinator {
                 .msg_tx
                 .send(crate::channels::MessagingCommand::ConnectTo { peer });
 
+            let reconnect_cap = self.reconnect_cap;
             if let Some(entry) = self.reconnect_queue.get_mut(&device_id) {
                 entry.next_attempt = Instant::now() + entry.current_delay;
-                entry.current_delay = match entry.current_delay {
-                    d if d < RECONNECT_STEP_1 => RECONNECT_STEP_1,
-                    d if d < RECONNECT_STEP_2 => RECONNECT_STEP_2,
-                    _ => RECONNECT_CAP,
-                };
+                entry.current_delay = next_backoff_delay(entry.current_delay, reconnect_cap);
             }
         }
     }
@@ -699,4 +714,54 @@ impl Coordinator {
 fn compute_content_hash(content: &str) -> String {
     let hash = sha2::Sha256::digest(content.as_bytes());
     hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The documented ladder with default bounds: 1 s initial → 5 s →
+    /// 15 s → 60 s cap, then stays at the cap.
+    #[test]
+    fn backoff_climbs_the_documented_ladder() {
+        let cap = Duration::from_secs(60);
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(1), cap),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(5), cap),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(15), cap),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(60), cap),
+            Duration::from_secs(60)
+        );
+    }
+
+    /// A configured cap smaller than a ladder step clamps instead of
+    /// overshooting it.
+    #[test]
+    fn backoff_clamps_to_the_configured_cap() {
+        let cap = Duration::from_secs(10);
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(1), cap),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(5), cap),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(10), cap),
+            Duration::from_secs(10)
+        );
+
+        let tiny = Duration::from_secs(3);
+        assert_eq!(next_backoff_delay(Duration::from_secs(1), tiny), tiny);
+    }
 }

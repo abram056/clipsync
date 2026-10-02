@@ -477,12 +477,14 @@ mod tests {
     }
 
     /// An ephemeral port outside the range the integration tests reserve for
-    /// themselves, so a concurrently running test binary cannot collide.
+    /// themselves (phase_c 60191+, phase_d 61191+, protocol_validation
+    /// 62300+, each plus `pid % 1000`), so a concurrently running test
+    /// binary cannot collide.
     fn free_udp_port() -> u16 {
         for _ in 0..20 {
             let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe socket");
             let port = socket.local_addr().expect("probe address").port();
-            if !(60000..=63000).contains(&port) {
+            if !(60000..=64000).contains(&port) {
                 return port;
             }
         }

@@ -18,7 +18,7 @@ const DEFAULT_PAIRING_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CLIPBOARD_POLL_INTERVAL_MS: u64 = 250;
 const DEFAULT_HISTORY_MAX_SIZE_BYTES: u64 = 2_097_152;
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct AppConfig {
     pub network: NetworkConfig,
     pub history: HistoryConfig,
@@ -28,6 +28,7 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct NetworkConfig {
     pub discovery_port: u16,
     pub listen_port: u16,
@@ -36,16 +37,17 @@ pub struct NetworkConfig {
     pub peer_timeout_secs: u64,
     pub reconnect_backoff_initial_ms: u64,
     pub reconnect_backoff_max_ms: u64,
-    #[serde(default)]
     pub discovery_targets: Vec<SocketAddr>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct HistoryConfig {
     pub max_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct SyncConfig {
     pub max_clipboard_bytes: usize,
     pub max_peers: usize,
@@ -56,49 +58,71 @@ pub struct SyncConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct PlatformConfig {
     pub clipboard_poll_interval_ms: u64,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("clipboard-sync");
+fn default_data_dir() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."))
+}
 
+impl Default for NetworkConfig {
+    fn default() -> Self {
         Self {
-            network: NetworkConfig {
-                discovery_port: DEFAULT_DISCOVERY_PORT,
-                listen_port: DEFAULT_WS_PORT,
-                discovery_interval_secs: DEFAULT_DISCOVERY_INTERVAL_SECS,
-                heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
-                peer_timeout_secs: DEFAULT_PEER_TIMEOUT_SECS,
-                reconnect_backoff_initial_ms: DEFAULT_RECONNECT_BACKOFF_INITIAL_MS,
-                reconnect_backoff_max_ms: DEFAULT_RECONNECT_BACKOFF_MAX_MS,
-                discovery_targets: Vec::new(),
-            },
-            history: HistoryConfig {
-                max_size_bytes: DEFAULT_HISTORY_MAX_SIZE_BYTES,
-            },
-            sync: SyncConfig {
-                max_clipboard_bytes: DEFAULT_MAX_CLIPBOARD_BYTES,
-                max_peers: DEFAULT_MAX_PEERS,
-                replay_cache_capacity: DEFAULT_REPLAY_CACHE_CAPACITY,
-                replay_cache_ttl_secs: DEFAULT_REPLAY_CACHE_TTL_SECS,
-                pairing_timeout_secs: DEFAULT_PAIRING_TIMEOUT_SECS,
-                enabled: true,
-            },
-            storage: StorageConfig {
-                path: data_dir.join("clipboard.db"),
-            },
-            platform: PlatformConfig {
-                clipboard_poll_interval_ms: DEFAULT_CLIPBOARD_POLL_INTERVAL_MS,
-            },
+            discovery_port: DEFAULT_DISCOVERY_PORT,
+            listen_port: DEFAULT_WS_PORT,
+            discovery_interval_secs: DEFAULT_DISCOVERY_INTERVAL_SECS,
+            heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+            peer_timeout_secs: DEFAULT_PEER_TIMEOUT_SECS,
+            reconnect_backoff_initial_ms: DEFAULT_RECONNECT_BACKOFF_INITIAL_MS,
+            reconnect_backoff_max_ms: DEFAULT_RECONNECT_BACKOFF_MAX_MS,
+            discovery_targets: Vec::new(),
+        }
+    }
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            max_size_bytes: DEFAULT_HISTORY_MAX_SIZE_BYTES,
+        }
+    }
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            max_clipboard_bytes: DEFAULT_MAX_CLIPBOARD_BYTES,
+            max_peers: DEFAULT_MAX_PEERS,
+            replay_cache_capacity: DEFAULT_REPLAY_CACHE_CAPACITY,
+            replay_cache_ttl_secs: DEFAULT_REPLAY_CACHE_TTL_SECS,
+            pairing_timeout_secs: DEFAULT_PAIRING_TIMEOUT_SECS,
+            enabled: true,
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: default_data_dir()
+                .join("clipboard-sync")
+                .join("clipboard.db"),
+        }
+    }
+}
+
+impl Default for PlatformConfig {
+    fn default() -> Self {
+        Self {
+            clipboard_poll_interval_ms: DEFAULT_CLIPBOARD_POLL_INTERVAL_MS,
         }
     }
 }
@@ -269,12 +293,9 @@ mod tests {
     }
 
     /// Doc 08: "Only keys the user sets need to appear in the file; unset
-    /// keys fall back to defaults." Today a partially-specified section
-    /// fails to deserialize because the section structs carry no per-field
-    /// `#[serde(default)]`, which takes the whole app down at startup. The
-    /// Stage 1 config fix flips this test on.
+    /// keys fall back to defaults." Section-level `#[serde(default)]` fills
+    /// unset keys from the section's documented defaults.
     #[test]
-    #[ignore = "doc 08 partial-config promise; enable with the per-field serde(default) fix"]
     fn partial_section_overlay_keeps_unmentioned_defaults() {
         let toml = "[network]\nlisten_port = 12342\n";
         let fc: FileConfig = toml::from_str(toml).expect("a partial section must parse");

@@ -357,3 +357,68 @@ fn sqlite_setting_outranks_file_config() {
     );
     handle.stop();
 }
+
+/// Doc 10 reconnect row: a peer that is killed and restarted on the same
+/// identity must be reconnected automatically — the failed retries while it
+/// is down are the backoff at work, and no re-pairing may be required
+/// (trust and device identity live in the database, not in the process).
+#[test]
+fn peer_restart_reconnects_without_repairing() {
+    // Mutual discovery targets: the coordinator's reconnect lookup needs
+    // this node's roster to hold the peer's address.
+    let config_a = make_config(8, 61261, 61262, Some("127.0.0.1:61263".parse().unwrap()));
+    let config_b = make_config(9, 61263, 61264, Some("127.0.0.1:61261".parse().unwrap()));
+
+    let handle_a = start(config_a).expect("start A");
+    let handle_b = start(config_b.clone()).expect("start B");
+    let b_before = handle_b.identity().0;
+
+    // Post-pairing receiver: stale DeviceConnected events from the initial
+    // pairing must not satisfy the reconnect assertion below.
+    let mut rx_a = setup_paired_manual(&handle_a, &handle_b);
+
+    // Kill B and keep it down long enough for at least one backoff attempt
+    // (first retry is scheduled 1 s after the disconnect) to fail.
+    handle_b.stop();
+    drop(handle_b);
+
+    assert!(
+        wait_for_event(&mut rx_a, Duration::from_secs(5), |et| matches!(
+            et,
+            EventType::DeviceConnectionFailed(p) if p.device_id == b_before
+        )),
+        "A must keep retrying while B is down"
+    );
+
+    std::thread::sleep(Duration::from_millis(500));
+    let handle_b2 = start(config_b).expect("restart B");
+    assert_eq!(
+        handle_b2.identity().0,
+        b_before,
+        "B's device identity must survive the restart"
+    );
+
+    assert!(
+        wait_for_event(&mut rx_a, Duration::from_secs(15), |et| matches!(
+            et,
+            EventType::DeviceConnected(p) if p.device_id == b_before
+        )),
+        "A must reconnect to B automatically after the restart"
+    );
+
+    // Working sync is the proof that trust carried over: a re-paired
+    // connection would still be in Pairing, where clipboard messages are
+    // refused with ErrorCode 2.
+    let mut rx_b = handle_b2.event_tx().subscribe();
+    handle_a.on_clipboard_changed("after peer restart");
+    assert!(
+        wait_for_event(&mut rx_b, Duration::from_secs(5), |et| matches!(
+            et,
+            EventType::ClipboardUpdatedFromRemote(_)
+        )),
+        "clipboard must sync over the re-established connection without re-pairing"
+    );
+
+    handle_a.stop();
+    handle_b2.stop();
+}

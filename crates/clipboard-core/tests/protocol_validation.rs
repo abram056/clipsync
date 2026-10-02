@@ -34,8 +34,8 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 /// Port bases reserved by this file (plus `pid % 1000`, the workspace
-/// convention). Chosen above phase_c (60191+) and above phase_d (61191+,
-/// which tops out at 62192 even with the pid offset).
+/// convention). Chosen above phase_c (60191+, topping out at 61253) and
+/// above phase_d (61191+, which tops out at 62263 even with the pid offset).
 const VERSION_MISMATCH_BASE: u16 = 62300;
 const OVERSIZED_BASE: u16 = 62304;
 const REPLAY_BASE: u16 = 62308;

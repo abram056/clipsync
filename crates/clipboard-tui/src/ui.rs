@@ -48,6 +48,9 @@ pub struct UiState {
     pub status_expires_at: Option<Instant>,
     /// Last error, shown until a newer one replaces it (doc 09:130).
     pub last_error: Option<String>,
+    /// The configured pairing timeout, so the overlay countdown tracks the
+    /// value the core actually enforces rather than a hardcoded guess.
+    pub pairing_timeout_secs: u64,
 }
 
 pub fn render(f: &mut Frame, state: &UiState) {
@@ -263,8 +266,10 @@ fn render_status(f: &mut Frame, state: &UiState, area: Rect) {
 fn render_pairing_overlay(f: &mut Frame, state: &UiState) {
     if let Some(prompt) = state.pairing_prompts.first() {
         let area = f.size();
-        let popup_width = 40.min(area.width - 4);
-        let popup_height = 7;
+        // Saturating maths: a tiny terminal (e.g. while resizing) must not
+        // underflow and abort the app.
+        let popup_width = 40.min(area.width.saturating_sub(4));
+        let popup_height = 7.min(area.height);
         let x = (area.width - popup_width) / 2;
         let y = (area.height - popup_height) / 2;
         let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -284,7 +289,9 @@ fn render_pairing_overlay(f: &mut Frame, state: &UiState) {
             Line::from(Span::styled(
                 format!(
                     "Expires in {}s",
-                    30u64.saturating_sub(prompt.received_at.elapsed().as_secs())
+                    state
+                        .pairing_timeout_secs
+                        .saturating_sub(prompt.received_at.elapsed().as_secs())
                 ),
                 Style::default().fg(Color::DarkGray),
             )),
@@ -433,5 +440,54 @@ mod tests {
         let controls_at = screen.find("Controls:").expect("controls rendered");
         assert!(status_at < error_at, "{screen}");
         assert!(error_at < controls_at, "{screen}");
+    }
+
+    fn prompt_with_age(age: Duration) -> PairingPrompt {
+        PairingPrompt {
+            request_id: uuid::Uuid::new_v4(),
+            device_id: uuid::Uuid::new_v4(),
+            device_name: "Phone".to_string(),
+            received_at: Instant::now() - age,
+        }
+    }
+
+    /// The overlay used to count down from a hardcoded 30 s while the core
+    /// times out at sync.pairing_timeout_secs (default 60). The expected
+    /// value is derived from the same prompt after rendering, so the test
+    /// cannot flake on timing.
+    #[test]
+    fn pairing_countdown_tracks_the_configured_timeout() {
+        let state = UiState {
+            pairing_timeout_secs: 45,
+            pairing_prompts: vec![prompt_with_age(Duration::from_secs(10))],
+            ..UiState::default()
+        };
+
+        let screen = render_screen(&state, 80, 24);
+        let expected =
+            45u64.saturating_sub(state.pairing_prompts[0].received_at.elapsed().as_secs());
+        assert_eq!(expected, 35, "prompt age must stay inside one second");
+        assert!(
+            screen.contains(&format!("Expires in {expected}s")),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("Expires in 20s"),
+            "hardcoded 30 s countdown is back: {screen}"
+        );
+    }
+
+    /// `area.width - 4` and `area.height - 7` used to underflow on a
+    /// terminal smaller than the popup, aborting the app mid-resize.
+    #[test]
+    fn pairing_overlay_survives_a_tiny_terminal() {
+        let state = UiState {
+            pairing_timeout_secs: 60,
+            pairing_prompts: vec![prompt_with_age(Duration::ZERO)],
+            ..UiState::default()
+        };
+
+        let screen = render_screen(&state, 3, 4);
+        assert!(!screen.is_empty());
     }
 }

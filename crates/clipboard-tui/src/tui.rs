@@ -19,15 +19,41 @@ use ratatui::Terminal;
 use crate::clipboard_monitor::{ClipboardMonitor, ClipboardWriter, SystemClipboardWriter};
 use crate::ui::{self, DeviceRow, HistoryRow, PairingPrompt, UiState};
 
-pub fn run(handle: AppHandle, poll_interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+/// Owns terminal mode: enters raw mode plus the alternate screen, and
+/// restores both on drop so an early return from [`run`] (a failed clipboard
+/// init, for instance) cannot leave the shell without echo or stuck in the
+/// alternate screen.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        // Constructed before entering the alternate screen so that any later
+        // failure still leaves raw mode restored.
+        let guard = Self;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(guard)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+pub fn run(
+    handle: AppHandle,
+    poll_interval_ms: u64,
+    pairing_timeout_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let terminal_guard = TerminalGuard::enter()?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let mut state = UiState {
         paused: handle.is_paused()?,
+        pairing_timeout_secs,
         ..UiState::default()
     };
 
@@ -134,8 +160,7 @@ pub fn run(handle: AppHandle, poll_interval_ms: u64) -> Result<(), Box<dyn std::
     let _ = input_thread.join();
     let _ = core_thread.join();
     let _ = monitor_thread.join();
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    drop(terminal_guard);
     terminal.show_cursor()?;
     handle.stop();
     Ok(())

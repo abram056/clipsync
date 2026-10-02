@@ -92,7 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.storage.path.display()
     );
 
-    tui::run(handle, config.platform.clipboard_poll_interval_ms)?;
+    tui::run(
+        handle,
+        config.platform.clipboard_poll_interval_ms,
+        config.sync.pairing_timeout_secs,
+    )?;
 
     Ok(())
 }

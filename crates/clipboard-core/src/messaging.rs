@@ -375,9 +375,12 @@ impl MessagingService {
                                 }
                             };
                             _last_pong = tokio::time::Instant::now();
-                            Self::handle_message(
+                            if let Some(reply) = Self::handle_message(
                                 env, &session_state_handle, peer_device_id, &inbound_tx,
-                            ).await;
+                                self_device_id, &self_device_name,
+                            ).await {
+                                let _ = send_envelope(&mut *sink.lock().await, &reply).await;
+                            }
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
                             let env = match Envelope::from_bytes(&data) {
@@ -388,9 +391,12 @@ impl MessagingService {
                                 }
                             };
                             _last_pong = tokio::time::Instant::now();
-                            Self::handle_message(
+                            if let Some(reply) = Self::handle_message(
                                 env, &session_state_handle, peer_device_id, &inbound_tx,
-                            ).await;
+                                self_device_id, &self_device_name,
+                            ).await {
+                                let _ = send_envelope(&mut *sink.lock().await, &reply).await;
+                            }
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                             let pong_env = Envelope::build(
@@ -433,12 +439,16 @@ impl MessagingService {
         }
     }
 
+    /// Returns the ERROR envelope the connection must be answered with when
+    /// the message is refused, or None when it was forwarded normally.
     async fn handle_message(
         env: Envelope,
         session_state: &Arc<Mutex<SessionState>>,
         peer_device_id: Uuid,
         inbound_tx: &InboundEnvelopeTx,
-    ) {
+        self_device_id: Uuid,
+        self_device_name: &str,
+    ) -> Option<Envelope> {
         match &env.message_type {
             MessageType::Ping | MessageType::Pong => {}
             MessageType::HelloAck => {}
@@ -471,7 +481,20 @@ impl MessagingService {
                                 "messaging: rejected non-pairing message from untrusted {}",
                                 peer_device_id
                             );
-                            return;
+                            // Doc 03 connection state model: in Pairing, only
+                            // PAIRING_* and PING/PONG flow; everything else is
+                            // refused with UNKNOWN_DEVICE (ErrorCode 2). The
+                            // connection stays open so the peer can still pair.
+                            return Some(Envelope::build(
+                                MessageType::Error,
+                                self_device_id,
+                                self_device_name.to_string(),
+                                Payload::Error(clipboard_proto::message::ErrorPayload {
+                                    code: ErrorCode::UnknownDevice,
+                                    message: "sender is not a trusted device".to_string(),
+                                    related_message_id: Some(env.message_id),
+                                }),
+                            ));
                         }
                     }
                 }
@@ -481,6 +504,7 @@ impl MessagingService {
                 });
             }
         }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -767,9 +791,12 @@ impl MessagingService {
                                 }
                             };
                             _last_pong = tokio::time::Instant::now();
-                            Self::handle_message(
+                            if let Some(reply) = Self::handle_message(
                                 env, &session_state_handle, peer_id, &inbound_tx,
-                            ).await;
+                                self_device_id, &self_device_name,
+                            ).await {
+                                let _ = send_envelope(&mut *sink.lock().await, &reply).await;
+                            }
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
                             let env = match Envelope::from_bytes(&data) {
@@ -780,9 +807,12 @@ impl MessagingService {
                                 }
                             };
                             _last_pong = tokio::time::Instant::now();
-                            Self::handle_message(
+                            if let Some(reply) = Self::handle_message(
                                 env, &session_state_handle, peer_id, &inbound_tx,
-                            ).await;
+                                self_device_id, &self_device_name,
+                            ).await {
+                                let _ = send_envelope(&mut *sink.lock().await, &reply).await;
+                            }
                         }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                             let pong_env = Envelope::build(
@@ -884,18 +914,52 @@ mod tests {
         let session_state = Arc::new(Mutex::new(SessionState::Pairing));
         let (inbound_tx, mut inbound_rx) = inbound_envelope_channel();
         let peer = Uuid::new_v4();
+        let self_id = Uuid::new_v4();
 
-        MessagingService::handle_message(clipboard_update(peer), &session_state, peer, &inbound_tx)
-            .await;
+        let rejected = clipboard_update(peer);
+        let refused_id = rejected.message_id;
+        let reply = MessagingService::handle_message(
+            rejected,
+            &session_state,
+            peer,
+            &inbound_tx,
+            self_id,
+            "self",
+        )
+        .await;
         assert!(
             inbound_rx.try_recv().is_err(),
             "clipboard update must be rejected while the session is Pairing"
         );
+        let reply = reply.expect("the refusal must be answered with an ERROR envelope");
+        assert_eq!(reply.message_type, MessageType::Error);
+        match reply.payload {
+            Payload::Error(ep) => {
+                assert_eq!(ep.code, ErrorCode::UnknownDevice);
+                assert_eq!(
+                    ep.related_message_id,
+                    Some(refused_id),
+                    "the ERROR must reference the refused message"
+                );
+            }
+            other => panic!("expected Payload::Error, got {:?}", other),
+        }
 
         *session_state.lock().await = SessionState::Trusted;
 
-        MessagingService::handle_message(clipboard_update(peer), &session_state, peer, &inbound_tx)
-            .await;
+        let reply = MessagingService::handle_message(
+            clipboard_update(peer),
+            &session_state,
+            peer,
+            &inbound_tx,
+            self_id,
+            "self",
+        )
+        .await;
+        assert!(
+            reply.is_none(),
+            "a trusted message must not be answered with an error"
+        );
         let forwarded = inbound_rx
             .try_recv()
             .expect("clipboard update must be accepted after promotion");

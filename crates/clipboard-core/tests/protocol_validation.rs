@@ -42,6 +42,7 @@ const REPLAY_BASE: u16 = 62308;
 const SKEW_BASE: u16 = 62312;
 const DUPLICATE_HASH_BASE: u16 = 62316;
 const REJECT_BASE: u16 = 62320;
+const PRETRUST_BASE: u16 = 62324;
 
 fn test_port(port: u16) -> u16 {
     port + (std::process::id() % 1_000) as u16
@@ -580,6 +581,92 @@ fn pairing_reject_returns_reject_to_requester() {
             "node should emit PairingRejected"
         );
     });
+
+    handle.stop();
+}
+
+/// A clipboard message from a connection still in Pairing must be refused
+/// with UNKNOWN_DEVICE (ErrorCode 2) on the wire — and the connection must
+/// survive so the peer can still pair (doc 03, connection state model).
+#[test]
+fn pre_trust_clipboard_update_returns_unknown_device() {
+    let config = make_config(7, PRETRUST_BASE, PRETRUST_BASE + 1, 2_097_152);
+    let handle = start(config).expect("start node");
+    let addr = node_addr(PRETRUST_BASE + 1);
+    let mut rx = handle.event_tx().subscribe();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let (mut peer, _ack) = HostilePeer::connect(addr, PROTOCOL_VERSION).await;
+
+        // Session stays Pairing: no approval, no PAIRING_ACCEPT.
+        let refused = clipboard_update(peer.device_id, "hash-pretrust", "early".to_string());
+        let refused_id = refused.message_id;
+        peer.send(refused).await;
+
+        let err = peer
+            .recv_matching(Duration::from_secs(5), |env| {
+                env.message_type == MessageType::Error
+            })
+            .await
+            .expect("ERROR for the pre-trust clipboard update");
+        match err.payload {
+            Payload::Error(ep) => {
+                assert_eq!(
+                    ep.code,
+                    ErrorCode::UnknownDevice,
+                    "pre-trust clipboard messages are refused with ErrorCode 2"
+                );
+                assert_eq!(
+                    ep.related_message_id,
+                    Some(refused_id),
+                    "the ERROR must reference the refused message"
+                );
+            }
+            other => panic!("expected Payload::Error, got {:?}", other),
+        }
+
+        // Nothing may be applied: no ACK for it, and history stays empty.
+        let ack = peer
+            .recv_matching(Duration::from_millis(500), |env| {
+                env.message_type == MessageType::ClipboardAck
+            })
+            .await;
+        assert!(
+            ack.is_none(),
+            "the refused message must not produce a CLIPBOARD_ACK"
+        );
+
+        // Send-and-continue: the pairing channel still works after the
+        // violation, so the peer can request pairing on the same socket.
+        let request_id = Uuid::new_v4();
+        let request = Envelope::build(
+            MessageType::PairingRequest,
+            peer.device_id,
+            peer.device_name.clone(),
+            Payload::PairingRequest(PairingRequestPayload {
+                device_id: peer.device_id,
+                device_name: peer.device_name.clone(),
+                platform: Platform::Linux,
+                request_id,
+            }),
+        );
+        peer.send(request).await;
+        assert!(
+            wait_for(&mut rx, Duration::from_secs(5), |et| matches!(
+                et,
+                EventType::PairingRequested(p) if p.device_id == peer.device_id
+            )),
+            "the connection must survive the refusal so pairing can still proceed"
+        );
+    });
+
+    // Outside rt.block_on: history_size_bytes drives block_on internally.
+    assert_eq!(
+        handle.history_size_bytes().unwrap(),
+        0,
+        "the refused message must not reach history"
+    );
 
     handle.stop();
 }

@@ -46,6 +46,8 @@ pub struct UiState {
     pub active_pane: usize,
     pub status_message: Option<String>,
     pub status_expires_at: Option<Instant>,
+    /// Last error, shown until a newer one replaces it (doc 09:130).
+    pub last_error: Option<String>,
 }
 
 pub fn render(f: &mut Frame, state: &UiState) {
@@ -134,7 +136,7 @@ fn render_history(f: &mut Frame, state: &UiState, area: Rect) {
             ),
             Span::raw(preview),
             Span::styled(
-                format!(" · {}", device_name(state, entry.origin_device_id)),
+                format!(" · {}", state.device_label(entry.origin_device_id)),
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
@@ -159,16 +161,17 @@ fn render_history(f: &mut Frame, state: &UiState, area: Rect) {
     f.render_widget(list, area);
 }
 
-fn device_name(state: &UiState, device_id: uuid::Uuid) -> &str {
-    state
-        .devices
-        .iter()
-        .find(|device| device.device_id == device_id)
-        .map(|device| device.name.as_str())
-        .unwrap_or("Unknown device")
-}
-
 impl UiState {
+    /// Name for a device id, falling back to the wording doc 09 requires
+    /// when the id is not in the device list.
+    pub fn device_label(&self, device_id: uuid::Uuid) -> &str {
+        self.devices
+            .iter()
+            .find(|device| device.device_id == device_id)
+            .map(|device| device.name.as_str())
+            .unwrap_or("Unknown device")
+    }
+
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_message = Some(message.into());
         self.status_expires_at = Some(Instant::now() + Duration::from_secs(4));
@@ -204,7 +207,11 @@ fn render_status(f: &mut Frame, state: &UiState, area: Rect) {
         format!("{} B", size_bytes)
     };
 
-    let lines = vec![
+    // Layout order matters: on a standard 24-line terminal the status pane
+    // has only ~4 usable rows, so the transient message and the persistent
+    // error sit directly after the stats — the old code spliced them into
+    // the controls block (index 12), where they were never visible.
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Sync: ", Style::default()),
             Span::styled(sync_status, Style::default().fg(sync_color)),
@@ -217,32 +224,35 @@ fn render_status(f: &mut Frame, state: &UiState, area: Rect) {
             Span::styled("History: ", Style::default()),
             Span::raw(format!("{}/2 MB", size_str)),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Controls:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(" Tab     Switch pane"),
-        Line::from(" ↑/↓     Move selection"),
-        Line::from(" Enter   Restore entry"),
-        Line::from(" P       Pair device"),
-        Line::from(" F       Forget device"),
-        Line::from(" A/R     Approve/Reject"),
-        Line::from(" S       Pause/Resume"),
-        Line::from(" Q       Quit"),
     ];
 
-    if let Some(ref msg) = state.status_message {
-        let mut lines = lines.clone();
-        lines.insert(12, Line::from(""));
-        lines.insert(
-            13,
-            Line::from(Span::styled(
-                msg.as_str(),
-                Style::default().fg(Color::Yellow),
-            )),
-        );
+    if let Some(msg) = &state.status_message {
+        lines.push(Line::from(Span::styled(
+            msg.as_str(),
+            Style::default().fg(Color::Yellow),
+        )));
     }
+
+    if let Some(error) = &state.last_error {
+        lines.push(Line::from(vec![
+            Span::styled("Last error: ", Style::default().fg(Color::Red)),
+            Span::styled(error.as_str(), Style::default().fg(Color::Red)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Controls:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(" Tab     Switch pane"));
+    lines.push(Line::from(" ↑/↓     Move selection"));
+    lines.push(Line::from(" Enter   Restore entry"));
+    lines.push(Line::from(" P       Pair device"));
+    lines.push(Line::from(" F       Forget device"));
+    lines.push(Line::from(" A/R     Approve/Reject"));
+    lines.push(Line::from(" S       Pause/Resume"));
+    lines.push(Line::from(" Q       Quit"));
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" Status "))
@@ -294,5 +304,134 @@ fn render_pairing_overlay(f: &mut Frame, state: &UiState) {
             )
             .wrap(Wrap { trim: true });
         f.render_widget(paragraph, popup_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render `state` into a TestBackend buffer and return it as text; each
+    /// row comes back as a quoted line via TestBackend's Display impl.
+    fn render_screen(state: &UiState, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("TestBackend");
+        terminal.draw(|f| super::render(f, state)).expect("render");
+        format!("{}", terminal.backend())
+    }
+
+    fn device_row(
+        id: uuid::Uuid,
+        name: &str,
+        discovered: bool,
+        connected: bool,
+        trusted: bool,
+    ) -> DeviceRow {
+        DeviceRow {
+            device_id: id,
+            name: name.to_string(),
+            platform: Platform::Linux,
+            discovered,
+            last_seen: None,
+            connected,
+            trusted,
+        }
+    }
+
+    /// doc 09:128 distinguishes discovered (○) from connected (●). Discovery
+    /// used to set `connected`, so every unpaired device rendered as live.
+    #[test]
+    fn discovered_peer_is_not_rendered_as_connected() {
+        let mut state = UiState::default();
+        state.devices.push(device_row(
+            uuid::Uuid::new_v4(),
+            "Phone",
+            true,
+            false,
+            false,
+        ));
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(screen.contains('○'), "discovered device: {screen}");
+        assert!(!screen.contains('●'), "must not look connected: {screen}");
+    }
+
+    #[test]
+    fn peer_count_counts_only_connected_devices() {
+        let mut state = UiState::default();
+        state
+            .devices
+            .push(device_row(uuid::Uuid::new_v4(), "Laptop", true, true, true));
+        state.devices.push(device_row(
+            uuid::Uuid::new_v4(),
+            "Phone",
+            true,
+            false,
+            false,
+        ));
+        state.devices.push(device_row(
+            uuid::Uuid::new_v4(),
+            "Tablet",
+            false,
+            false,
+            true,
+        ));
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(screen.contains("Peers: 1"), "{screen}");
+        assert!(screen.contains('●'), "the connected one: {screen}");
+        assert!(screen.contains('○'), "the discovered one: {screen}");
+    }
+
+    #[test]
+    fn device_label_resolves_names_and_falls_back_to_unknown() {
+        let mut state = UiState::default();
+        let laptop = uuid::Uuid::new_v4();
+        state
+            .devices
+            .push(device_row(laptop, "Laptop", false, false, true));
+
+        assert_eq!(state.device_label(laptop), "Laptop");
+        // doc 09:58 wording for an origin that is not in the list.
+        assert_eq!(state.device_label(uuid::Uuid::new_v4()), "Unknown device");
+    }
+
+    /// The old code spliced the message into the controls block at index 12,
+    /// which a 24-line terminal never reaches.
+    #[test]
+    fn status_message_is_visible_on_a_standard_terminal() {
+        let mut state = UiState::default();
+        state.set_status("Sync paused");
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(screen.contains("Sync paused"), "{screen}");
+    }
+
+    #[test]
+    fn last_error_is_visible_on_a_standard_terminal() {
+        let state = UiState {
+            last_error: Some("boom".to_string()),
+            ..UiState::default()
+        };
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(screen.contains("Last error: boom"), "{screen}");
+    }
+
+    #[test]
+    fn status_precedes_last_error_precedes_controls() {
+        let mut state = UiState {
+            last_error: Some("boom".to_string()),
+            ..UiState::default()
+        };
+        state.set_status("Sync paused");
+
+        let screen = render_screen(&state, 80, 50);
+        let status_at = screen.find("Sync paused").expect("status rendered");
+        let error_at = screen.find("Last error: boom").expect("error rendered");
+        let controls_at = screen.find("Controls:").expect("controls rendered");
+        assert!(status_at < error_at, "{screen}");
+        assert!(error_at < controls_at, "{screen}");
     }
 }

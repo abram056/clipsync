@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use clipboard_core::AppHandle;
-use clipboard_proto::event::{Event, EventType};
+use clipboard_proto::event::{Event, EventType, PairingRejectReason};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -216,16 +216,17 @@ fn handle_key(
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
             if let Some(prompt) = state.pairing_prompts.first() {
+                // Removal and the status line belong to the
+                // PairingAccepted/PairingFailed event, which is where the
+                // device name is still available.
                 handle.approve_pairing(prompt.device_id);
-                state.set_status(format!("Approved {}", prompt.device_name));
-                state.pairing_prompts.remove(0);
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             if let Some(prompt) = state.pairing_prompts.first() {
+                // Same as approve: PairingRejected removes the prompt and
+                // reports the outcome.
                 handle.reject_pairing(prompt.device_id, "rejected by user");
-                state.set_status(format!("Rejected {}", prompt.device_name));
-                state.pairing_prompts.remove(0);
             }
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -257,7 +258,8 @@ fn handle_core_event(
             if let Some(device) = existing {
                 device.discovered = true;
                 device.last_seen = Some(Instant::now());
-                device.connected = true;
+                // Discovery proves reachability, not a live connection:
+                // DeviceConnected owns that flag (doc 09:128).
             } else {
                 state.devices.push(DeviceRow {
                     device_id: p.device_id,
@@ -265,7 +267,7 @@ fn handle_core_event(
                     platform: p.platform,
                     discovered: true,
                     last_seen: Some(Instant::now()),
-                    connected: true,
+                    connected: false,
                     trusted: false,
                 });
             }
@@ -292,6 +294,19 @@ fn handle_core_event(
             }
         }
         EventType::PairingRequested(p) => {
+            // Later pairing events carry ids only (no name), so make sure the
+            // requester is listed by name while we still have it.
+            if !state.devices.iter().any(|d| d.device_id == p.device_id) {
+                state.devices.push(DeviceRow {
+                    device_id: p.device_id,
+                    name: p.device_name.clone(),
+                    platform: p.platform,
+                    discovered: false,
+                    last_seen: None,
+                    connected: false,
+                    trusted: false,
+                });
+            }
             state.pairing_prompts.push(PairingPrompt {
                 request_id: p.request_id,
                 device_id: p.device_id,
@@ -300,9 +315,16 @@ fn handle_core_event(
             });
         }
         EventType::PairingAccepted(p) => {
+            let label = state
+                .pairing_prompts
+                .iter()
+                .find(|pr| pr.request_id == p.request_id)
+                .map(|pr| pr.device_name.clone())
+                .unwrap_or_else(|| state.device_label(p.device_id).to_string());
             state
                 .pairing_prompts
                 .retain(|pr| pr.request_id != p.request_id);
+            state.set_status(format!("Paired with {label}"));
             let trusted = match handle.trusted_peers() {
                 Ok(trusted) => trusted,
                 Err(error) => {
@@ -330,13 +352,55 @@ fn handle_core_event(
             }
         }
         EventType::PairingRejected(p) => {
+            let label = state
+                .pairing_prompts
+                .iter()
+                .find(|pr| pr.request_id == p.request_id)
+                .map(|pr| pr.device_name.clone())
+                .unwrap_or_else(|| state.device_label(p.device_id).to_string());
             state
                 .pairing_prompts
                 .retain(|pr| pr.request_id != p.request_id);
+            // One event covers three outcomes: our own reject, the peer's
+            // deny, and the configured timeout (the core emits it for all
+            // three), so the pairing outcome is always reported (doc 09:157).
+            let message = match p.reason {
+                PairingRejectReason::Timeout => format!("Pairing with {label} timed out"),
+                PairingRejectReason::UserDenied => format!("Pairing with {label} rejected"),
+                PairingRejectReason::InternalError => format!("Pairing with {label} failed"),
+            };
+            state.set_status(message);
+        }
+        EventType::PairingFailed(p) => {
+            // The payload carries no device id, so the name can only come
+            // from the matching prompt.
+            let label = state
+                .pairing_prompts
+                .iter()
+                .find(|pr| pr.request_id == p.request_id)
+                .map(|pr| pr.device_name.clone())
+                .unwrap_or_else(|| "the peer".to_string());
+            state
+                .pairing_prompts
+                .retain(|pr| pr.request_id != p.request_id);
+            let message = format!("Pairing with {label} failed: {}", p.error);
+            state.set_status(message.clone());
+            state.last_error = Some(message);
+        }
+        EventType::DeviceConnectionFailed(p) => {
+            // Retries follow the backoff schedule, so only the persistent
+            // line is updated: a transient flash would fire on every attempt.
+            let message = format!(
+                "Connection to {} failed: {}",
+                state.device_label(p.device_id),
+                p.error
+            );
+            state.last_error = Some(message);
         }
         EventType::ClipboardUpdatedFromRemote(p) => match clipboard.write_text(&p.content) {
             Ok(()) => {
-                state.set_status(format!("Received from {}", p.origin_device_id));
+                let origin = state.device_label(p.origin_device_id).to_string();
+                state.set_status(format!("Received from {origin}"));
                 refresh_history(state, handle);
             }
             Err(error) => state.set_status(format!("Clipboard write failed: {error}")),
@@ -348,10 +412,14 @@ fn handle_core_event(
             state.set_status("Entry restored");
         }
         EventType::NetworkError(p) => {
-            state.set_status(format!("Network error: {}", p.error));
+            let message = format!("Network error: {}", p.error);
+            state.set_status(message.clone());
+            state.last_error = Some(message);
         }
         EventType::ProtocolError(p) => {
-            state.set_status(format!("Protocol error: {}", p.description));
+            let message = format!("Protocol error: {}", p.description);
+            state.set_status(message.clone());
+            state.last_error = Some(message);
         }
         _ => {}
     }

@@ -214,7 +214,39 @@ impl MessagingService {
                     "messaging: max peers reached, rejecting connection from {}",
                     addr
                 );
-                drop(stream);
+                // Doc 08: excess connections are refused with ErrorCode 12.
+                // The handshake must complete before the refusal can ride the
+                // wire, so answer in the background and keep accepting.
+                let self_id = self_device_id;
+                let self_name = self_device_name.clone();
+                tokio::spawn(async move {
+                    let plain_stream = MaybeTlsStream::Plain(stream);
+                    let ws_stream =
+                        match accept_async_with_config(plain_stream, Some(ws_config())).await {
+                            Ok(ws) => ws,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "messaging: over-cap WS handshake with {} failed: {}",
+                                    addr,
+                                    e
+                                );
+                                return;
+                            }
+                        };
+                    let (mut sink, _peer_stream) = ws_stream.split();
+                    let err_env = Envelope::build(
+                        MessageType::Error,
+                        self_id,
+                        self_name,
+                        Payload::Error(clipboard_proto::message::ErrorPayload {
+                            code: ErrorCode::ConnectionLimit,
+                            message: format!("connection limit of {} peers reached", max_peers),
+                            related_message_id: None,
+                        }),
+                    );
+                    let _ = send_envelope(&mut sink, &err_env).await;
+                    let _ = sink.close().await;
+                });
                 continue;
             }
 

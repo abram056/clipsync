@@ -43,6 +43,7 @@ const SKEW_BASE: u16 = 62312;
 const DUPLICATE_HASH_BASE: u16 = 62316;
 const REJECT_BASE: u16 = 62320;
 const PRETRUST_BASE: u16 = 62324;
+const CONNECTION_LIMIT_BASE: u16 = 62328;
 
 fn test_port(port: u16) -> u16 {
     port + (std::process::id() % 1_000) as u16
@@ -667,6 +668,73 @@ fn pre_trust_clipboard_update_returns_unknown_device() {
         0,
         "the refused message must not reach history"
     );
+
+    handle.stop();
+}
+
+/// Connections past `sync.max_peers` are refused with CONNECTION_LIMIT
+/// (ErrorCode 12), and the peers already inside keep their sessions
+/// (doc 08, limits table).
+#[test]
+fn connection_limit_returns_error_twelve() {
+    let mut config = make_config(
+        8,
+        CONNECTION_LIMIT_BASE,
+        CONNECTION_LIMIT_BASE + 1,
+        2_097_152,
+    );
+    config.sync.max_peers = 1;
+    let handle = start(config).expect("start node");
+    let addr = node_addr(CONNECTION_LIMIT_BASE + 1);
+    let mut rx = handle.event_tx().subscribe();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        // The first peer fills the single slot.
+        let (peer_a, ack_a) = HostilePeer::connect(addr, PROTOCOL_VERSION).await;
+        let mut peer_a = peer_a;
+        match ack_a.map(|a| a.payload) {
+            Some(Payload::HelloAck(ha)) => assert!(ha.accepted, "first peer must be accepted"),
+            other => panic!("expected accepted HELLO_ACK, got {:?}", other),
+        }
+        // The slot is recorded just after HELLO_ACK is written; give the
+        // connection loop time to get there before opening the second one.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The second peer is refused with ErrorCode 12.
+        let (_peer_b, first) = HostilePeer::connect(addr, PROTOCOL_VERSION).await;
+        let first = first.expect("the over-cap connection must be answered");
+        match first.payload {
+            Payload::Error(ep) => assert_eq!(
+                ep.code,
+                ErrorCode::ConnectionLimit,
+                "over-cap connections are refused with ErrorCode 12"
+            ),
+            other => panic!("expected Payload::Error, got {:?}", other),
+        }
+
+        // The first peer's session is unaffected: pairing still works.
+        let request_id = Uuid::new_v4();
+        let request = Envelope::build(
+            MessageType::PairingRequest,
+            peer_a.device_id,
+            peer_a.device_name.clone(),
+            Payload::PairingRequest(PairingRequestPayload {
+                device_id: peer_a.device_id,
+                device_name: peer_a.device_name.clone(),
+                platform: Platform::Linux,
+                request_id,
+            }),
+        );
+        peer_a.send(request).await;
+        assert!(
+            wait_for(&mut rx, Duration::from_secs(5), |et| matches!(
+                et,
+                EventType::PairingRequested(p) if p.device_id == peer_a.device_id
+            )),
+            "the first peer must keep working after the second is refused"
+        );
+    });
 
     handle.stop();
 }

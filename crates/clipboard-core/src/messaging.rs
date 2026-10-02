@@ -68,6 +68,8 @@ pub struct MessagingService {
     listen_port: u16,
     platform: clipboard_proto::types::Platform,
     max_peers: usize,
+    heartbeat_interval: Duration,
+    peer_timeout: Duration,
     event_tx: broadcast::Sender<Event>,
     inbound_tx: InboundEnvelopeTx,
     trusted_devices: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
@@ -89,6 +91,8 @@ impl MessagingService {
     ) -> tokio::task::JoinHandle<()> {
         let max_peers = config.sync.max_peers;
         let listen_port = config.network.listen_port;
+        let heartbeat_interval = Duration::from_secs(config.network.heartbeat_interval_secs);
+        let peer_timeout = Duration::from_secs(config.network.peer_timeout_secs);
 
         let svc = Self {
             self_device_id,
@@ -96,6 +100,8 @@ impl MessagingService {
             listen_port,
             platform,
             max_peers,
+            heartbeat_interval,
+            peer_timeout,
             event_tx,
             inbound_tx,
             trusted_devices: Arc::new(Mutex::new(HashMap::new())),
@@ -151,11 +157,22 @@ impl MessagingService {
             let self_name = self.self_device_name.clone();
             let platform = self.platform;
             let max_peers = self.max_peers;
+            let heartbeat_interval = self.heartbeat_interval;
+            let peer_timeout = self.peer_timeout;
 
             tokio::spawn(async move {
                 Self::server_loop(
-                    listener, self_id, self_name, platform, inbound_tx, event_tx, trusted, active,
+                    listener,
+                    self_id,
+                    self_name,
+                    platform,
+                    inbound_tx,
+                    event_tx,
+                    trusted,
+                    active,
                     max_peers,
+                    heartbeat_interval,
+                    peer_timeout,
                 )
                 .await;
             })
@@ -171,11 +188,23 @@ impl MessagingService {
             let self_name = self.self_device_name.clone();
             let platform = self.platform;
             let storage = storage.clone();
+            let heartbeat_interval = self.heartbeat_interval;
+            let peer_timeout = self.peer_timeout;
 
             tokio::spawn(async move {
                 Self::command_loop(
-                    msg_rx, self_id, self_name, platform, inbound_tx, event_tx, trusted, active,
-                    outbox, storage,
+                    msg_rx,
+                    self_id,
+                    self_name,
+                    platform,
+                    inbound_tx,
+                    event_tx,
+                    trusted,
+                    active,
+                    outbox,
+                    storage,
+                    heartbeat_interval,
+                    peer_timeout,
                 )
                 .await;
             })
@@ -198,6 +227,8 @@ impl MessagingService {
         trusted: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
         max_peers: usize,
+        heartbeat_interval: Duration,
+        peer_timeout: Duration,
     ) {
         loop {
             let (stream, addr) = match listener.accept().await {
@@ -259,8 +290,17 @@ impl MessagingService {
 
             tokio::spawn(async move {
                 Self::handle_server_connection(
-                    stream, addr, self_id, self_name, platform, inbound_tx, event_tx, trusted,
+                    stream,
+                    addr,
+                    self_id,
+                    self_name,
+                    platform,
+                    inbound_tx,
+                    event_tx,
+                    trusted,
                     active,
+                    heartbeat_interval,
+                    peer_timeout,
                 )
                 .await;
             });
@@ -278,6 +318,8 @@ impl MessagingService {
         event_tx: broadcast::Sender<Event>,
         trusted: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
+        heartbeat_interval: Duration,
+        peer_timeout: Duration,
     ) {
         let plain_stream = MaybeTlsStream::Plain(stream);
         let ws_stream = match accept_async_with_config(plain_stream, Some(ws_config())).await {
@@ -367,9 +409,6 @@ impl MessagingService {
                 },
             );
         }
-
-        let heartbeat_interval = Duration::from_secs(15);
-        let peer_timeout = Duration::from_secs(45);
 
         let write_handle = {
             let sink = sink.clone();
@@ -551,6 +590,8 @@ impl MessagingService {
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
         outbox: OutboxMap,
         storage: Arc<Storage>,
+        heartbeat_interval: Duration,
+        peer_timeout: Duration,
     ) {
         while let Some(cmd) = msg_rx.recv().await {
             match cmd {
@@ -572,8 +613,18 @@ impl MessagingService {
 
                     tokio::spawn(async move {
                         Self::connect_to_peer(
-                            peer_addr, peer_id, self_id, self_name, platform, inbound_tx, event_tx,
-                            trusted, active, outbox,
+                            peer_addr,
+                            peer_id,
+                            self_id,
+                            self_name,
+                            platform,
+                            inbound_tx,
+                            event_tx,
+                            trusted,
+                            active,
+                            outbox,
+                            heartbeat_interval,
+                            peer_timeout,
                         )
                         .await;
                     });
@@ -674,6 +725,8 @@ impl MessagingService {
         trusted: Arc<Mutex<HashMap<Uuid, PeerInfo>>>,
         active: Arc<Mutex<HashMap<Uuid, ConnectionHandle>>>,
         outbox: OutboxMap,
+        heartbeat_interval: Duration,
+        peer_timeout: Duration,
     ) {
         tracing::info!("messaging: connecting to {} at {}", peer_id, addr);
 
@@ -786,7 +839,6 @@ impl MessagingService {
             }
         }
 
-        let heartbeat_interval = Duration::from_secs(15);
         let write_handle = {
             let sink = sink.clone();
             tokio::spawn(async move {
@@ -808,7 +860,6 @@ impl MessagingService {
             })
         };
 
-        let peer_timeout = Duration::from_secs(45);
         let mut _last_pong = tokio::time::Instant::now();
         loop {
             tokio::select! {

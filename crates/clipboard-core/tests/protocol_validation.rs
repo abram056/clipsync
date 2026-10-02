@@ -21,7 +21,7 @@ use clipboard_core::config::{
 };
 use clipboard_core::{start, AppHandle};
 use clipboard_proto::error::ErrorCode;
-use clipboard_proto::event::{DuplicateReason, Event, EventType};
+use clipboard_proto::event::{DisconnectReason, DuplicateReason, Event, EventType};
 use clipboard_proto::message::{
     ClipboardAckStatus, ClipboardUpdatePayload, Envelope, HelloPayload, MessageType,
     PairingRejectReason, PairingRequestPayload, Payload, PROTOCOL_VERSION,
@@ -44,6 +44,7 @@ const DUPLICATE_HASH_BASE: u16 = 62316;
 const REJECT_BASE: u16 = 62320;
 const PRETRUST_BASE: u16 = 62324;
 const CONNECTION_LIMIT_BASE: u16 = 62328;
+const HEARTBEAT_BASE: u16 = 62332;
 
 fn test_port(port: u16) -> u16 {
     port + (std::process::id() % 1_000) as u16
@@ -733,6 +734,48 @@ fn connection_limit_returns_error_twelve() {
                 EventType::PairingRequested(p) if p.device_id == peer_a.device_id
             )),
             "the first peer must keep working after the second is refused"
+        );
+    });
+
+    handle.stop();
+}
+
+/// Heartbeat and peer timeout come from `heartbeat_interval_secs` and
+/// `peer_timeout_secs`, not from hardcoded 15 s/45 s (doc 08 network
+/// constants, doc 10 heartbeat row). Configured small: 1 s / 3 s.
+#[test]
+fn configured_heartbeat_and_peer_timeout_are_honoured() {
+    let mut config = make_config(9, HEARTBEAT_BASE, HEARTBEAT_BASE + 1, 2_097_152);
+    config.network.heartbeat_interval_secs = 1;
+    config.network.peer_timeout_secs = 3;
+    let handle = start(config).expect("start node");
+    let addr = node_addr(HEARTBEAT_BASE + 1);
+    let mut rx = handle.event_tx().subscribe();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let (mut peer, _ack) = HostilePeer::connect(addr, PROTOCOL_VERSION).await;
+
+        // A PING arrives on the configured 1 s interval (the interval's
+        // first tick fires as soon as the connection is up).
+        let ping = peer
+            .recv_matching(Duration::from_secs(3), |env| {
+                env.message_type == MessageType::Ping
+            })
+            .await;
+        assert!(
+            ping.is_some(),
+            "the node must PING within heartbeat_interval_secs"
+        );
+
+        // The peer never answers, so the configured 3 s timeout applies.
+        assert!(
+            wait_for(&mut rx, Duration::from_secs(8), |et| matches!(
+                et,
+                EventType::DeviceDisconnected(p)
+                    if matches!(p.reason, DisconnectReason::Timeout)
+            )),
+            "a silent peer must be dropped after peer_timeout_secs (3s, not 45s)"
         );
     });
 

@@ -141,16 +141,6 @@ impl HarnessConfig {
     }
 }
 
-/// A single-line rendering of clipboard content for log output.
-fn preview(content: &str) -> String {
-    const MAX: usize = 120;
-    if content.chars().count() <= MAX {
-        return content.to_string();
-    }
-    let truncated: String = content.chars().take(MAX).collect();
-    format!("{}...", truncated)
-}
-
 /// Hand queued clipboard text to the core once a trusted peer is connected.
 ///
 /// The core records a content hash when it observes a local update, even when
@@ -168,7 +158,7 @@ fn flush_clipboard(
         return;
     }
     for content in pending.drain(..) {
-        tracing::info!("sending clipboard: {}", preview(&content));
+        tracing::info!("sending clipboard: {} bytes", content.len());
         let _ = app_cmd_tx.send(crate::channels::AppCommand::ClipboardChanged {
             content,
             content_type: "text/plain".to_string(),
@@ -323,10 +313,10 @@ pub fn run_harness(config: HarnessConfig) {
                     }
                     clipboard_proto::event::EventType::ClipboardUpdatedFromRemote(p) => {
                         tracing::info!(
-                            "[{}] Received clipboard from {}: {}",
+                            "[{}] Received clipboard from {} ({} bytes)",
                             node_id,
                             p.origin_device_id,
-                            preview(&p.content)
+                            p.content.len()
                         );
                     }
                     clipboard_proto::event::EventType::SyncCompleted(p) => {

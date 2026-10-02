@@ -316,3 +316,44 @@ fn forget_stops_sync_and_reconnects() {
     handle_a.stop();
     handle_b.stop();
 }
+
+/// Precedence per doc 08: SQLite `app_settings` outrank the TOML file, which
+/// outranks defaults — specifically for `sync.enabled`. The file/default says
+/// sync is on; a persisted pause must survive a restart.
+#[test]
+fn sqlite_setting_outranks_file_config() {
+    let config = make_config(7, 61231, 61232, None);
+
+    {
+        let handle = start(config.clone()).expect("start");
+        assert!(
+            !handle.is_paused().unwrap(),
+            "fresh store falls back to the file/default (enabled)"
+        );
+
+        handle.set_paused(true);
+        // The command loop persists on SetPaused, but the write is async;
+        // poll until the coordinator reports the new state.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.is_paused().unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "set_paused(true) never took effect"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        handle.stop();
+    }
+
+    // Dropping the handle shuts the runtime down and releases the ports.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Restart with the same store while the config still says enabled.
+    let handle = start(config).expect("restart");
+    assert!(
+        handle.is_paused().unwrap(),
+        "the persisted sync.enabled=false must outrank the file's enabled=true"
+    );
+    handle.stop();
+}

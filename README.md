@@ -117,3 +117,4 @@ The specification lives in [`docs/`](docs/):
 | [08 Configuration](docs/08_Configuration_And_Constants.md) | Config keys and constants |
 | [09 UI Specification](docs/09_UI_Specification.md) | TUI and Android UI |
 | [10 Testing Strategy](docs/10_Testing_Strategy.md) | Test plan and coverage |
+| [11 Conformance And Resource Baseline](docs/11_Conformance_And_Resource_Baseline.md) | Requirement traceability, deviations, measured resource use |

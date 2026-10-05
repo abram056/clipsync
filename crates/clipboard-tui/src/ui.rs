@@ -145,21 +145,33 @@ fn render_history(f: &mut Frame, state: &UiState, area: Rect) {
     };
 
     let mut items: Vec<ListItem> = Vec::new();
+    // doc 09:58 lists the first line of the entry, followed by the time and
+    // the origin. content_preview still carries the whole clipboard payload
+    // because restore writes it back verbatim, so the display line is
+    // derived here and every part is bounded to the pane: origin first, so
+    // a long device name can never eat the preview budget.
+    let inner_width = usize::from(area.width.saturating_sub(2));
+
     for (i, entry) in state.history.iter().enumerate() {
         let time = entry.created_at.with_timezone(&chrono::Local);
-        let time_str = time.format("%H:%M").to_string();
+        let time_text = format!("{} ", time.format("%H:%M"));
 
-        let preview: String = entry.content_preview.chars().take(40).collect();
+        let origin_budget = inner_width.saturating_sub(UnicodeWidthStr::width(time_text.as_str()));
+        let origin_text = ellipsize(
+            &format!(" · {}", state.device_label(entry.origin_device_id)),
+            origin_budget,
+        );
+
+        let preview_budget = inner_width
+            .saturating_sub(UnicodeWidthStr::width(time_text.as_str()))
+            .saturating_sub(UnicodeWidthStr::width(origin_text.as_str()));
+        let first_line = entry.content_preview.lines().next().unwrap_or("");
+        let preview = ellipsize(first_line.trim_end(), preview_budget);
+
         let line = Line::from(vec![
-            Span::styled(
-                format!("{} ", time_str),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(time_text, Style::default().fg(Color::DarkGray)),
             Span::raw(preview),
-            Span::styled(
-                format!(" · {}", state.device_label(entry.origin_device_id)),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(origin_text, Style::default().fg(Color::DarkGray)),
         ]);
 
         let style = if state.active_pane == 1 && i == state.selected_history {
@@ -412,6 +424,15 @@ mod tests {
             last_seen: None,
             connected,
             trusted,
+        }
+    }
+
+    fn history_row(content: &str, origin: uuid::Uuid) -> HistoryRow {
+        HistoryRow {
+            clipboard_id: uuid::Uuid::new_v4(),
+            content_preview: content.to_string(),
+            created_at: chrono::Utc::now(),
+            origin_device_id: origin,
         }
     }
 
@@ -696,6 +717,70 @@ mod tests {
         assert!(
             !screen.contains(tail),
             "name was not truncated inside the popup: {screen}"
+        );
+    }
+
+    /// The preview used to be a fixed 40 characters regardless of how wide
+    /// the pane was, so the origin label was the part that fell off the
+    /// end on anything narrower than a very wide terminal.
+    #[test]
+    fn history_preview_fits_the_pane_and_keeps_the_origin() {
+        let tail = "UNIQUE-CONTENT-TAIL";
+        let content = format!("{}{tail}", "content-".repeat(30));
+        let mut state = UiState::default();
+        state
+            .history
+            .push(history_row(&content, uuid::Uuid::new_v4()));
+
+        for (width, height) in [(80, 24), (120, 40), (225, 53)] {
+            let screen = render_screen(&state, width, height);
+            assert!(
+                screen.contains("Unknown device"),
+                "origin label lost at {width}x{height}: {screen}"
+            );
+            assert!(
+                !screen.contains(tail),
+                "preview was not truncated at {width}x{height}: {screen}"
+            );
+        }
+    }
+
+    /// content_preview holds the whole clipboard payload, because restore
+    /// writes it back verbatim. Only the first line belongs on screen
+    /// (doc 09:58), so a copied multi-line block must not spill its later
+    /// lines into the row.
+    #[test]
+    fn history_row_renders_only_the_first_line() {
+        let mut state = UiState::default();
+        state.history.push(history_row(
+            "A\nSECOND-LINE-MARKER-and-more-text-here",
+            uuid::Uuid::new_v4(),
+        ));
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(
+            !screen.contains("SECOND-LINE-MARKER"),
+            "later lines leaked into the row: {screen}"
+        );
+        assert!(
+            screen.contains("Unknown device"),
+            "row not rendered: {screen}"
+        );
+    }
+
+    /// A multi-byte preview must not overrun the pane it is drawn into.
+    #[test]
+    fn history_preview_counts_display_width() {
+        let mut state = UiState::default();
+        state.history.push(history_row(
+            "日语测试文本日语测试文本日语测试文本",
+            uuid::Uuid::new_v4(),
+        ));
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(
+            screen.contains("Unknown device"),
+            "double-width preview pushed the origin out: {screen}"
         );
     }
 }

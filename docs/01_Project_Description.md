@@ -131,4 +131,4 @@ The MVP will be considered successful if it can:
 - Establish trusted peer connections.
 - Synchronize plain text clipboard content between paired devices with minimal latency.
 - Maintain reliable clipboard history without synchronization loops or duplicate entries.
-- Operate continuously with minimal resource consumption while providing a seamless clipboard sharing experience.
+- Operate continuously with minimal resource consumption while providing a seamless clipboard sharing experience. For the desktop node this is stated measurably: an idle node with no clipboard traffic must average under 1% CPU (measured over one minute on a release build) and hold resident memory below 40 MB. Both figures and the measurement method are recorded in doc 11.

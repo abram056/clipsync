@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone)]
 pub struct DeviceRow {
@@ -191,6 +192,33 @@ impl UiState {
     }
 }
 
+/// Truncate `text` to at most `max_width` terminal columns, appending `…`
+/// when anything was cut. Counts display width rather than characters, so a
+/// double-width glyph cannot overrun the pane it is being drawn into.
+fn ellipsize(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+
+    // Leave a column for the ellipsis itself.
+    let budget = max_width - 1;
+    let mut out = String::with_capacity(max_width);
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > budget {
+            break;
+        }
+        out.push(ch);
+        used += width;
+    }
+    out.push('…');
+    out
+}
+
 fn render_status(f: &mut Frame, state: &UiState, area: Rect) {
     let sync_status = if state.paused { "OFF" } else { "ON" };
     let sync_color = if state.paused {
@@ -229,17 +257,32 @@ fn render_status(f: &mut Frame, state: &UiState, area: Rect) {
         ]),
     ];
 
+    // The status pane is only 25% of the terminal, and both of these strings
+    // interpolate network-controlled text: a device name or an error
+    // description can be arbitrarily long. Under Wrap they reflowed into
+    // ragged fragments that pushed the controls block down the pane and
+    // buried the connection status messages. Truncating to the pane width
+    // keeps each one a single readable line.
+    let inner_width = usize::from(area.width.saturating_sub(2));
+
     if let Some(msg) = &state.status_message {
         lines.push(Line::from(Span::styled(
-            msg.as_str(),
+            ellipsize(msg, inner_width),
             Style::default().fg(Color::Yellow),
         )));
     }
 
     if let Some(error) = &state.last_error {
+        let prefix = "Last error: ";
         lines.push(Line::from(vec![
-            Span::styled("Last error: ", Style::default().fg(Color::Red)),
-            Span::styled(error.as_str(), Style::default().fg(Color::Red)),
+            Span::styled(prefix, Style::default().fg(Color::Red)),
+            Span::styled(
+                ellipsize(
+                    error,
+                    inner_width.saturating_sub(UnicodeWidthStr::width(prefix)),
+                ),
+                Style::default().fg(Color::Red),
+            ),
         ]));
     }
 
@@ -489,5 +532,90 @@ mod tests {
 
         let screen = render_screen(&state, 3, 4);
         assert!(!screen.is_empty());
+    }
+
+    /// Status and error strings interpolate network-controlled text (device
+    /// names, peer error descriptions), so either can be far longer than the
+    /// 25%-wide pane they are drawn into. They used to go through Wrap,
+    /// which reflowed them into ragged fragments and shoved the controls
+    /// block out of view.
+    fn unwrapped_status_screen(state: &UiState, width: u16, height: u16) -> Vec<String> {
+        render_screen(state, width, height)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn row_with(rows: &[String], needle: &str) -> Option<usize> {
+        rows.iter().position(|row| row.contains(needle))
+    }
+
+    #[test]
+    fn long_status_message_stays_on_one_line() {
+        let mut state = UiState::default();
+        let head = "Pairing with ".to_string();
+        let tail = "timed out after sixty seconds".to_string();
+        state.set_status(format!("{head}{} {tail}", "long-device-name ".repeat(20)));
+
+        for (width, height) in [(80, 24), (225, 53)] {
+            let rows = unwrapped_status_screen(&state, width, height);
+
+            let status_row = row_with(&rows, &head).expect("message head rendered");
+            // Wrapped text continues onto the next row; truncated text does not.
+            assert!(
+                rows.get(status_row + 1).is_none_or(|r| !r.contains(&tail)),
+                "message reflowed at {width}x{height}: {rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r.contains(&tail)),
+                "message was wrapped rather than ellipsized at {width}x{height}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_connection_error_keeps_stats_and_controls_visible() {
+        let head = "Connection to ".to_string();
+        let tail = "connection reset by peer".to_string();
+        let message = format!("{head}{} failed: {tail}", "long-device-name ".repeat(20));
+        let state = UiState {
+            last_error: Some(message),
+            ..UiState::default()
+        };
+
+        for (width, height) in [(80, 24), (225, 53)] {
+            let rows = unwrapped_status_screen(&state, width, height);
+            let screen = rows.join("\n");
+
+            assert!(
+                screen.contains("Last error: "),
+                "label lost at {width}x{height}"
+            );
+            assert!(
+                row_with(&rows, "Sync:").is_some(),
+                "stats buried at {width}x{height}"
+            );
+            assert!(
+                row_with(&rows, "Peers:").is_some(),
+                "stats buried at {width}x{height}"
+            );
+            assert!(
+                row_with(&rows, "Controls:").is_some(),
+                "controls pushed out of view at {width}x{height}: {screen}"
+            );
+            assert!(
+                !rows.iter().any(|r| r.contains(&tail)),
+                "error text wrapped instead of ellipsizing at {width}x{height}: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn ellipsize_measures_display_width_not_chars() {
+        // Six CJK glyphs are 12 columns wide, so only three fit alongside
+        // the ellipsis in a 6-column budget.
+        assert_eq!(ellipsize("日语测试文本", 6), "日语…");
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("anything", 0), "");
     }
 }

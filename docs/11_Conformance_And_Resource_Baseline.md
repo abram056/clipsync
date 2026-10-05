@@ -84,8 +84,70 @@ baseline describes the shipped UI.
 
 # Accepted Deviations
 
-Recorded in a separate commit so the traceability table and the deviation log
-land independently.
+Deviations from the specifications, recorded for Phase F. Each entry is
+either a known gap or a point where the specification leaves the choice
+open and the implementation picked one.
+
+## Gap: GOODBYE is never sent
+
+doc 03 requires GOODBYE when a pairing is rejected (doc 03:653, doc 03:669)
+and during graceful shutdown (doc 03:675). `MessageType::Goodbye` is defined
+in `clipboard-proto` and inbound GOODBYE is handled (`messaging.rs`), but no
+code path sends it: `PairingManager::reject` transmits `PAIRING_REJECT` and
+leaves the session to time out or be closed by the peer.
+
+The user-visible behaviour is still correct — the requester learns the
+outcome from `PAIRING_REJECT`, which
+`protocol_validation::pairing_reject_returns_reject_to_requester` covers —
+so only the polite session teardown is missing.
+
+**Deferred**, not fixed here: it needs a new messaging command, an explicit
+point in both the reject and shutdown paths, and tests on both sides.
+
+## Decision: ErrorCode 2 leaves the connection open
+
+doc 03:636 states that clipboard messages are rejected with ErrorCode 2
+while a connection sits in the Pairing state, but does not say whether the
+connection should then be closed. The implementation answers with an `ERROR`
+message and keeps the session alive, so the pairing exchange can continue.
+
+Chosen because closing would abort a legitimate pairing attempt whenever a
+peer sends a message out of order.
+
+## Deviation: `max_peers` bounds inbound connections only
+
+doc 08:37 defines `max_peers` without specifying a direction. The server
+enforces it (`protocol_validation::connection_limit_returns_error_twelve`
+returns ErrorCode 12 past the limit), but outbound dialling is not capped,
+so a peer could in principle hold more than `max_peers` sockets if it is
+also dialling out. **Accepted for MVP**; revisit if connection growth ever
+becomes a concern.
+
+## Note: reconnect ladder clamps to the configured bounds
+
+doc 08:68 documents the ladder as 1 s → 5 s → 15 s → 60 s. The
+implementation walks exactly those steps under the default configuration and
+clamps them to whatever `reconnect_backoff_initial_ms` and
+`reconnect_backoff_max_ms` are set to, so a lowered cap shortens the ladder
+rather than exceeding it. This is the intended reading of having the bounds
+configurable, and `phase_d_core::peer_restart_reconnects_without_repairing`
+plus `coordinator`'s backoff unit tests cover it.
+
+## Note: `device_name` is not bounded by the protocol
+
+Nothing in doc 03 or the `clipboard-proto` types caps `device_name`, and no
+validation rejects an oversized one. Rather than change the wire contract in
+the MVP, the TUI bounds the name where it is drawn (device list, pairing
+popup, status messages) so markers and pane geometry survive. A protocol-level
+cap would be a doc 03 change with a matching error code, which is out of scope
+here.
+
+## Coverage note: LAN broadcast is a manual test
+
+`phase_c_sync::lan_broadcast_discovery_manual` is `#[ignore]`d: it needs a
+real broadcast-capable network, which loopback does not provide. It is run by
+hand and is excluded from CI, so the LAN half of the discovery success
+criterion is verified manually (doc 10 §2).
 
 # Future Work
 

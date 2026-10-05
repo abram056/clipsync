@@ -93,10 +93,16 @@ pub fn run(
     let input_thread = std::thread::spawn(move || {
         while !input_shutdown.load(Ordering::Relaxed) {
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(CrosstermEvent::Key(key)) = event::read() {
-                    if key.kind == KeyEventKind::Press {
-                        let _ = input_tx.send(InputEvent::Key(key));
+                match event::read() {
+                    Ok(CrosstermEvent::Key(key)) => {
+                        if key.kind == KeyEventKind::Press {
+                            let _ = input_tx.send(InputEvent::Key(key));
+                        }
                     }
+                    Ok(CrosstermEvent::Resize(..)) => {
+                        let _ = input_tx.send(InputEvent::Resize);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -145,6 +151,11 @@ pub fn run(
             Ok(InputEvent::Core(event)) => {
                 handle_core_event(&mut state, &handle, &mut clipboard, event);
             }
+            // Nothing in state to update: reaching the top of the loop
+            // calls terminal.draw(), which re-reads the terminal size, so
+            // this arm exists purely to repaint now instead of waiting for
+            // the periodic tick.
+            Ok(InputEvent::Resize) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -169,6 +180,9 @@ pub fn run(
 enum InputEvent {
     Key(KeyEvent),
     Core(Event),
+    /// A terminal resize. The reader used to discard these, which left the
+    /// redraw to the periodic tick rather than making it immediate.
+    Resize,
 }
 
 fn handle_key(

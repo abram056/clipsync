@@ -93,7 +93,25 @@ fn wait_for_event(
     timeout: Duration,
     predicate: impl Fn(&EventType) -> bool,
 ) -> bool {
-    !drain_events(rx, timeout, predicate).is_empty()
+    // Return on the first match instead of draining the whole window;
+    // negative assertions still wait theirs out, because they never match.
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(event) => {
+                if predicate(&event.event_type) {
+                    return true;
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 fn wait_for_discovered(

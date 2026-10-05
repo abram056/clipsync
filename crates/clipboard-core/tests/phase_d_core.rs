@@ -62,38 +62,33 @@ fn make_config(
     }
 }
 
-fn drain_events(
-    rx: &mut tokio::sync::broadcast::Receiver<clipboard_proto::event::Event>,
-    timeout: Duration,
-    predicate: impl Fn(&EventType) -> bool,
-) -> Vec<EventType> {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut found = Vec::new();
-    loop {
-        match rx.try_recv() {
-            Ok(event) => {
-                if predicate(&event.event_type) {
-                    found.push(event.event_type);
-                }
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => break,
-        }
-    }
-    found
-}
-
 fn wait_for_event(
     rx: &mut tokio::sync::broadcast::Receiver<clipboard_proto::event::Event>,
     timeout: Duration,
     predicate: impl Fn(&EventType) -> bool,
 ) -> bool {
-    !drain_events(rx, timeout, predicate).is_empty()
+    // Return on the first match instead of draining the whole window:
+    // callers pass generous upper bounds, and paying them out in full when
+    // the event is already there made this helper the slowest part of the
+    // suite. A negative assertion still waits out the window, because it
+    // never matches.
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(event) => {
+                if predicate(&event.event_type) {
+                    return true;
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 fn wait_for_discovered(

@@ -80,26 +80,46 @@ fn render_devices(f: &mut Frame, state: &UiState, area: Rect) {
         " Devices "
     };
 
+    // Device names arrive from the network with no length cap anywhere in
+    // the protocol, so the name is what gives way: the indicator, the
+    // platform and the [trusted] marker are reserved first and only the
+    // remainder is budgeted to the name. Without this a long hostname or a
+    // hostile peer pushed the markers clean out of the pane.
+    let inner_width = usize::from(area.width.saturating_sub(2));
+
     let mut items: Vec<ListItem> = Vec::new();
     for (i, device) in state.devices.iter().enumerate() {
-        let indicator = if device.connected {
-            Span::styled("● ", Style::default().fg(Color::Green))
+        let (indicator_text, indicator_style) = if device.connected {
+            ("● ", Style::default().fg(Color::Green))
         } else if device.discovered {
-            Span::styled("○ ", Style::default().fg(Color::DarkGray))
+            ("○ ", Style::default().fg(Color::DarkGray))
         } else {
-            Span::styled("· ", Style::default().fg(Color::DarkGray))
+            ("· ", Style::default().fg(Color::DarkGray))
         };
+        let indicator = Span::styled(indicator_text, indicator_style);
 
+        let platform_text = format!(" ({})", device.platform);
+        let suffix_text = if device.trusted { " [trusted]" } else { "" };
+
+        let reserved = UnicodeWidthStr::width(indicator_text)
+            + UnicodeWidthStr::width(platform_text.as_str())
+            + UnicodeWidthStr::width(suffix_text);
         let name = if device.trusted {
-            Span::styled(device.name.clone(), Style::default().fg(Color::Cyan))
+            Span::styled(
+                ellipsize(&device.name, inner_width.saturating_sub(reserved)),
+                Style::default().fg(Color::Cyan),
+            )
         } else {
-            Span::raw(device.name.clone())
+            Span::raw(ellipsize(
+                &device.name,
+                inner_width.saturating_sub(reserved),
+            ))
         };
 
         let suffix = if device.trusted {
-            Span::styled(" [trusted]", Style::default().fg(Color::DarkGray))
+            Span::styled(suffix_text, Style::default().fg(Color::DarkGray))
         } else {
-            Span::raw("")
+            Span::raw(suffix_text)
         };
 
         let style = if state.active_pane == 0 && i == state.selected_device {
@@ -108,10 +128,7 @@ fn render_devices(f: &mut Frame, state: &UiState, area: Rect) {
             Style::default()
         };
 
-        let platform = Span::styled(
-            format!(" ({})", device.platform),
-            Style::default().fg(Color::DarkGray),
-        );
+        let platform = Span::styled(platform_text, Style::default().fg(Color::DarkGray));
         let line = Line::from(vec![indicator, name, platform, suffix]);
         items.push(ListItem::new(line).style(style));
     }
@@ -317,6 +334,12 @@ fn render_pairing_overlay(f: &mut Frame, state: &UiState) {
         let y = (area.height - popup_height) / 2;
         let popup_area = Rect::new(x, y, popup_width, popup_height);
 
+        // The requester's name is peer-supplied and unbounded; bound it to
+        // the popup so it cannot wrap and push the countdown off-screen.
+        let inner_width = usize::from(popup_width.saturating_sub(2));
+        let from_label = "From: ";
+        let name_budget = inner_width.saturating_sub(UnicodeWidthStr::width(from_label));
+
         let lines = vec![
             Line::from(Span::styled(
                 "Pairing Request",
@@ -326,8 +349,11 @@ fn render_pairing_overlay(f: &mut Frame, state: &UiState) {
             )),
             Line::from(""),
             Line::from(vec![
-                Span::raw("From: "),
-                Span::styled(prompt.device_name.clone(), Style::default().fg(Color::Cyan)),
+                Span::raw(from_label),
+                Span::styled(
+                    ellipsize(&prompt.device_name, name_budget),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
             Line::from(Span::styled(
                 format!(
@@ -617,5 +643,59 @@ mod tests {
         assert_eq!(ellipsize("日语测试文本", 6), "日语…");
         assert_eq!(ellipsize("short", 10), "short");
         assert_eq!(ellipsize("anything", 0), "");
+    }
+
+    /// Nothing in the protocol bounds `device_name`, so a peer can send any
+    /// length it likes. The markers around the name must still be readable.
+    #[test]
+    fn long_device_name_keeps_platform_and_trust_markers() {
+        let tail = "UNIQUE-DEVICE-NAME-TAIL";
+        let name = format!("{}{tail}", "device-name-".repeat(50));
+        let mut state = UiState::default();
+        state
+            .devices
+            .push(device_row(uuid::Uuid::new_v4(), &name, true, false, true));
+
+        for (width, height) in [(80, 24), (225, 53)] {
+            let screen = render_screen(&state, width, height);
+            assert!(
+                screen.contains(" (linux)"),
+                "platform marker lost at {width}x{height}: {screen}"
+            );
+            assert!(
+                screen.contains("[trusted]"),
+                "trust marker lost at {width}x{height}: {screen}"
+            );
+            assert!(
+                !screen.contains(tail),
+                "name was not truncated at {width}x{height}: {screen}"
+            );
+        }
+    }
+
+    /// The pairing popup is a wrapping Paragraph, so an unbounded name used
+    /// to reflow and shove the countdown out of the box.
+    #[test]
+    fn long_pairing_name_stays_inside_the_popup() {
+        let tail = "UNIQUE-PAIRING-NAME-TAIL";
+        let name = format!("{}{tail}", "device-name-".repeat(50));
+        let state = UiState {
+            pairing_timeout_secs: 60,
+            pairing_prompts: vec![PairingPrompt {
+                request_id: uuid::Uuid::new_v4(),
+                device_id: uuid::Uuid::new_v4(),
+                device_name: name,
+                received_at: Instant::now(),
+            }],
+            ..UiState::default()
+        };
+
+        let screen = render_screen(&state, 80, 24);
+        assert!(screen.contains("From: "), "label lost: {screen}");
+        assert!(screen.contains("Expires in"), "countdown lost: {screen}");
+        assert!(
+            !screen.contains(tail),
+            "name was not truncated inside the popup: {screen}"
+        );
     }
 }

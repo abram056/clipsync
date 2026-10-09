@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ClipSync"
+include(":app")

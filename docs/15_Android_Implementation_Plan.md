@@ -163,8 +163,8 @@ Baseline verified on:
 * rustc/cargo 1.97.0; workspace builds clean; 86 tests pass, 0 fail (1 ignored: manual discovery test)
 * two-node harness smoke test passes (discovery → auto-pair → auto-approve → clipboard delivery)
 * `main` in sync with `origin/main`
-* OpenJDK 25.0.4.1 — Gradle/AGP compatibility to be verified in Session 1
 * adb 36.0.0 installed; Android SDK/NDK absent (`ANDROID_HOME` unset)
+* OpenJDK 25.0.4.1 — system install is JRE-only (no `javac`); Gradle/AGP compatibility resolved in Session 1 to Temurin JDK 21 at `~/tools/jdk21` (see M1 record)
 * rustup targets: `x86_64-unknown-linux-gnu` only — Android targets pending Session 1
 * no Android device currently attached (required by Milestones 6 and 12)
 
@@ -1372,6 +1372,21 @@ Then stop and test.
 The next session should focus exclusively on the event pipeline.
 
 This keeps the difficult Rust↔Android boundary isolated before Android UI and services add additional moving parts.
+
+### Record — 2026-10-09
+
+Session 1 complete (all 10 steps):
+
+* steps 1–7 (baseline → skeleton → UniFFI → bridge → DTOs/errors →
+  ClipSyncCore lifecycle → Kotlin bindings) landed in commits b835ce3,
+  22ea5c8, f5cd941, 778ead6, 5077675
+* steps 8–10 verified on BND-L21 (API 26): `BridgeLifecycleTest` 2/2 pass —
+  start → identity → stop, and invalid config → `ClipSyncException.InvalidArgument`
+* toolchain deviations: Gradle 9.3.1 + AGP 9.1.1 + built-in Kotlin +
+  compileSdk 37; Temurin JDK 21 (see M1/M2 records)
+* scope note: Session 1 implemented the M2 lifecycle surface (start/stop/identity)
+  only; the remaining M2 queries and commands are open and should precede M3
+* next session = Milestone 3 (event pipeline) per this section
 
 ---
 

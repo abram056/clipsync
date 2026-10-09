@@ -1,0 +1,34 @@
+namespace clipsync {};
+
+dictionary BridgeConfig {
+    string storage_path;
+    u16 discovery_port;
+    u16 listen_port;
+    sequence<string> discovery_targets;
+    boolean sync_enabled;
+};
+
+dictionary DeviceIdentity {
+    string device_id;
+    string device_name;
+};
+
+[Error]
+enum ClipSyncError {
+    "InvalidArgument",
+    "CoreNotRunning",
+    "CoreStopped",
+    "StorageError",
+    "OperationFailed",
+    "InvalidDeviceId",
+    "NotFound",
+    "InternalError",
+};
+
+interface ClipSyncCore {
+    [Name = start, Throws = ClipSyncError]
+    constructor(BridgeConfig config);
+    [Throws = ClipSyncError]
+    DeviceIdentity identity();
+    void stop();
+};

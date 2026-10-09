@@ -3,5 +3,6 @@ members = [
     "crates/clipboard-proto",
     "crates/clipboard-core",
     "crates/clipboard-tui",
+    "crates/clipsync-bindgen",
 ]
 resolver = "2"

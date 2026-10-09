@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "com.abram056.clipsync.core"
+cdylib_name = "clipboard_core"
+android = true

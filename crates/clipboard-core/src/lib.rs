@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod channels;
 pub mod config;
 pub mod coordinator;
@@ -8,6 +9,7 @@ pub mod replay_cache;
 pub mod runtime;
 pub mod storage;
 
+pub use bridge::{BridgeConfig, ClipSyncCore, ClipSyncError, DeviceIdentity};
 pub use config::AppConfig;
 pub use runtime::{start, AppHandle};
 pub use storage::Storage;
@@ -357,3 +359,6 @@ pub fn run_harness(config: HarnessConfig) {
     handle.stop();
     tracing::info!("[{}] Stopped", node_id_for_log);
 }
+
+#[cfg(feature = "uniffi")]
+uniffi::include_scaffolding!("clipsync");

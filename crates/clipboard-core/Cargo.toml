@@ -21,7 +21,15 @@ dirs = "5"
 thiserror = "1"
 gethostname = "0.4"
 ctrlc = "3"
+uniffi = { version = "0.32", optional = true }
+
+[build-dependencies]
+uniffi = { version = "0.32", features = ["build"], optional = true }
+
+[features]
+uniffi = ["dep:uniffi"]
 
 [lib]
 name = "clipboard_core"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]

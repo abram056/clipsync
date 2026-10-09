@@ -223,6 +223,14 @@ No Rust integration is required yet.
 
 A clean Android build must work independently of the Rust bridge.
 
+### Record — 2026-10-09
+
+* Toolchain deviation (user-approved): Gradle 9.3.1 + AGP 9.1.1 + compileSdk/targetSdk 37 — the original AGP 9.0.1/compileSdk 36 pair cannot resolve current stable AndroidX (compose 1.12.1, core 1.19.1, lifecycle 2.11.0, navigation 2.10.2 require AGP ≥ 9.1 and API 37)
+* AGP built-in Kotlin: no `org.jetbrains.kotlin.android` plugin; compose compiler plugin 2.2.10 kept
+* System JDK is JRE-only (no `javac`); Temurin JDK 21 at `~/tools/jdk21` wired via machine-level `~/.gradle/gradle.properties`
+* `./gradlew :app:assembleDebug` green; debug APK ~18 MB
+* Bottom-nav skeleton (Home/History/Devices/Settings), light/dark semantic themes
+
 ---
 
 # 5. Milestone 2 — UniFFI Bridge Foundation
@@ -336,6 +344,15 @@ Before continuing:
 * Kotlin can stop the core.
 * Invalid configuration produces a useful error.
 * The Android process does not block while Rust starts.
+
+### Record — 2026-10-09
+
+* Rust bridge (Phase 1): UDL (`clipsync.udl`) + `bridge/` module + `cdylib` target in `clipboard-core`; workspace tests 90 pass (86 baseline + 4 bridge)
+* Android wiring (Phase 3): Gradle Exec tasks `generateBindings` (uniffi-bindgen → Kotlin, into `build/generated/uniffi`) and `buildRustBridge` (cargo-ndk arm64-v8a, `--features uniffi`, into `build/jniLibs/cargo`); generated Kotlin sources must be registered via `sourceSets.main.kotlin.directories` — AGP 9 built-in Kotlin does not compile Kotlin from `java.directories`
+* JNA must be consumed as `net.java.dev.jna:jna:<version>@aar` — the plain jar contains no Android `libjnidispatch.so`
+* `storage_path` is the SQLite database **file** path, not a directory
+* INTERNET permission added to the manifest (discovery binds UDP sockets)
+* On-device test on BND-L21 (API 26) via `connectedDebugAndroidTest`: `startRetrieveIdentityAndStop` + `invalidConfigurationProducesUsefulError` — 2/2 pass, 0 failures; core starts off the main thread, identity returns non-blank device id/name, clean stop
 
 ---
 

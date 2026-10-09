@@ -144,8 +144,9 @@ impl Coordinator {
                             Some(crate::channels::AppCommand::ClipboardChanged { content, content_type }) => {
                                 coordinator.on_local_clipboard(content, content_type);
                             }
-                            Some(crate::channels::AppCommand::RestoreHistoryEntry { clipboard_id }) => {
-                                coordinator.on_restore(clipboard_id);
+                            Some(crate::channels::AppCommand::RestoreHistoryEntry { clipboard_id, response }) => {
+                                let result = coordinator.on_restore(clipboard_id);
+                                let _ = response.send(result);
                             }
                             Some(crate::channels::AppCommand::ListHistory { limit, response }) => {
                                 let result = coordinator.storage.list_history(limit).map_err(|e| e.to_string());
@@ -158,6 +159,27 @@ impl Coordinator {
                             Some(crate::channels::AppCommand::ListTrustedPeers { response }) => {
                                 let result = coordinator.storage.trusted_peers().map_err(|e| e.to_string());
                                 let _ = response.send(result);
+                            }
+                            Some(crate::channels::AppCommand::ListDiscoveredPeers { response }) => {
+                                let peers: Vec<_> = coordinator
+                                    .discovered_peers
+                                    .values()
+                                    .map(|peer| {
+                                        let is_trusted = coordinator.storage.is_trusted(&peer.device_id).unwrap_or(false);
+                                        clipboard_proto::types::DeviceInfo {
+                                            device_id: peer.device_id,
+                                            device_name: peer.device_name.clone(),
+                                            platform: peer.platform,
+                                            is_trusted,
+                                            is_connected: coordinator.connected_peers.contains(&peer.device_id),
+                                        }
+                                    })
+                                    .collect();
+                                let _ = response.send(Ok(peers));
+                            }
+                            Some(crate::channels::AppCommand::ListConnectedDeviceIds { response }) => {
+                                let ids: Vec<_> = coordinator.connected_peers.iter().copied().collect();
+                                let _ = response.send(ids);
                             }
                             Some(crate::channels::AppCommand::ForgetDevice { device_id, response }) => {
                                 let result = coordinator.handle_forget(device_id);
@@ -332,15 +354,28 @@ impl Coordinator {
         ));
     }
 
-    fn on_restore(&mut self, clipboard_id: Uuid) {
-        if let Ok(Some(entry)) = self.storage.get_history_entry(&clipboard_id) {
-            self.replay_cache.check_and_record_hash(&entry.content_hash);
-            self.emit_event(EventType::ClipboardRestored(
-                clipboard_proto::event::ClipboardRestoredPayload { clipboard_id },
-            ));
-            tracing::info!("coordinator: restored clipboard {}", entry.clipboard_id);
-        } else {
-            tracing::warn!("coordinator: history entry {} not found", clipboard_id);
+    fn on_restore(&mut self, clipboard_id: Uuid) -> Result<(), String> {
+        match self.storage.get_history_entry(&clipboard_id) {
+            Ok(Some(entry)) => {
+                self.replay_cache.check_and_record_hash(&entry.content_hash);
+                self.emit_event(EventType::ClipboardRestored(
+                    clipboard_proto::event::ClipboardRestoredPayload { clipboard_id },
+                ));
+                tracing::info!("coordinator: restored clipboard {}", entry.clipboard_id);
+                Ok(())
+            }
+            Ok(None) => {
+                tracing::warn!("coordinator: history entry {} not found", clipboard_id);
+                Err(format!("history entry {} not found", clipboard_id))
+            }
+            Err(e) => {
+                tracing::error!(
+                    "coordinator: failed to restore clipboard {}: {}",
+                    clipboard_id,
+                    e
+                );
+                Err(e.to_string())
+            }
         }
     }
 

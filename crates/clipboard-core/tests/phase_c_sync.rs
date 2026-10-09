@@ -336,7 +336,7 @@ fn history_list_and_restore() {
     let entry = &history[0];
     assert_eq!(entry.content, "second");
 
-    handle.restore_history_entry(entry.clipboard_id);
+    handle.restore_history_entry(entry.clipboard_id).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 
     let restored = wait_for_event(&mut rx, Duration::from_secs(1), |et| {

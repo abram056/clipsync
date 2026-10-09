@@ -9,7 +9,11 @@ pub mod replay_cache;
 pub mod runtime;
 pub mod storage;
 
-pub use bridge::{BridgeConfig, ClipSyncCore, ClipSyncError, DeviceIdentity};
+pub use bridge::{
+    BridgeConfig, BridgeDevice, BridgeEvent, BridgeEventKind, BridgeHistoryEntry,
+    BridgePairingRequest, ClipSyncCore, ClipSyncError, ClipSyncEventListener,
+    ClipboardEventPayload, DeviceEventPayload, DeviceIdentity, SyncEventPayload,
+};
 pub use config::AppConfig;
 pub use runtime::{start, AppHandle};
 pub use storage::Storage;

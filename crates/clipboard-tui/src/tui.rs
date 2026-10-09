@@ -219,8 +219,12 @@ fn handle_key(
         KeyCode::Enter => {
             if state.active_pane == 1 && state.selected_history < state.history.len() {
                 let entry = &state.history[state.selected_history];
-                handle.restore_history_entry(entry.clipboard_id);
-                match clipboard.write_text(&entry.content_preview) {
+                let clipboard_id = entry.clipboard_id;
+                let content_preview = entry.content_preview.clone();
+                if let Err(error) = handle.restore_history_entry(clipboard_id) {
+                    state.set_status(format!("Restore failed: {error}"));
+                }
+                match clipboard.write_text(&content_preview) {
                     Ok(()) => state.set_status("Restored to clipboard"),
                     Err(error) => state.set_status(format!("Clipboard write failed: {error}")),
                 }

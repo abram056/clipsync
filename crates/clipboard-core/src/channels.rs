@@ -1,6 +1,6 @@
 use clipboard_proto::event::Event;
 use clipboard_proto::message::Envelope;
-use clipboard_proto::types::{PairingRequest, PeerInfo, TrustedPeer};
+use clipboard_proto::types::{DeviceInfo, PairingRequest, PeerInfo, TrustedPeer};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,7 @@ pub enum AppCommand {
     },
     RestoreHistoryEntry {
         clipboard_id: uuid::Uuid,
+        response: oneshot::Sender<Result<(), String>>,
     },
     ListHistory {
         limit: usize,
@@ -37,6 +38,12 @@ pub enum AppCommand {
     },
     ListTrustedPeers {
         response: oneshot::Sender<Result<Vec<TrustedPeer>, String>>,
+    },
+    ListDiscoveredPeers {
+        response: oneshot::Sender<Result<Vec<DeviceInfo>, String>>,
+    },
+    ListConnectedDeviceIds {
+        response: oneshot::Sender<Vec<uuid::Uuid>>,
     },
     ForgetDevice {
         device_id: uuid::Uuid,

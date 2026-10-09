@@ -13,6 +13,91 @@ dictionary DeviceIdentity {
     string device_name;
 };
 
+dictionary BridgeDevice {
+    string device_id;
+    string device_name;
+    string platform;
+    boolean is_trusted;
+    boolean is_connected;
+    i64? last_seen_ms;
+};
+
+dictionary BridgePairingRequest {
+    string request_id;
+    string device_id;
+    string device_name;
+    string platform;
+    i64 received_at_ms;
+};
+
+dictionary BridgeHistoryEntry {
+    string clipboard_id;
+    string content;
+    string content_type;
+    string content_hash;
+    string origin_device_id;
+    i64 created_at_ms;
+    i64 size_bytes;
+};
+
+[Enum]
+enum BridgeEventKind {
+    "ApplicationStarted",
+    "ApplicationStopping",
+    "DeviceDiscovered",
+    "DeviceConnected",
+    "DeviceDisconnected",
+    "DeviceConnectionFailed",
+    "PairingRequested",
+    "PairingAccepted",
+    "PairingRejected",
+    "PairingFailed",
+    "ClipboardUpdatedFromRemote",
+    "ClipboardHistoryUpdated",
+    "ClipboardRestored",
+    "SyncCompleted",
+    "DuplicateClipboardIgnored",
+    "NetworkError",
+    "ProtocolError",
+    "EventStreamLagged",
+};
+
+dictionary DeviceEventPayload {
+    string device_id;
+    string device_name;
+    string platform;
+    string reason;
+};
+
+dictionary ClipboardEventPayload {
+    string clipboard_id;
+    string content;
+    string content_type;
+    string content_hash;
+    string origin_device_id;
+    i64 created_at_ms;
+};
+
+dictionary SyncEventPayload {
+    i64 peer_count;
+    i64 history_bytes;
+    string reason;
+};
+
+dictionary BridgeEvent {
+    string event_id;
+    i64 timestamp_ms;
+    BridgeEventKind kind;
+    DeviceEventPayload? device;
+    ClipboardEventPayload? clipboard;
+    SyncEventPayload? sync;
+    i64 dropped_events;
+};
+
+callback interface ClipSyncEventListener {
+    void on_event(BridgeEvent event);
+};
+
 [Error]
 enum ClipSyncError {
     "InvalidArgument",
@@ -31,4 +116,45 @@ interface ClipSyncCore {
     [Throws = ClipSyncError]
     DeviceIdentity identity();
     void stop();
+
+    // Devices
+    [Throws = ClipSyncError]
+    sequence<BridgeDevice> trusted_peers();
+    [Throws = ClipSyncError]
+    sequence<BridgeDevice> discovered_peers();
+    [Throws = ClipSyncError]
+    void forget_device(string device_id);
+
+    // Pairing
+    [Throws = ClipSyncError]
+    sequence<BridgePairingRequest> pending_pairing_requests();
+    [Throws = ClipSyncError]
+    void request_pairing(string device_id);
+    [Throws = ClipSyncError]
+    void approve_pairing(string device_id);
+    [Throws = ClipSyncError]
+    void reject_pairing(string device_id, string reason);
+
+    // Clipboard
+    void on_clipboard_changed(string content);
+    [Throws = ClipSyncError]
+    void restore_history_entry(string clipboard_id);
+
+    // History
+    [Throws = ClipSyncError]
+    sequence<BridgeHistoryEntry> history(u32 limit);
+    [Throws = ClipSyncError]
+    void clear_history();
+    [Throws = ClipSyncError]
+    i64 history_size_bytes();
+
+    // Synchronization
+    [Throws = ClipSyncError]
+    boolean is_paused();
+    [Throws = ClipSyncError]
+    void set_paused(boolean paused);
+
+    // Events
+    void subscribe(ClipSyncEventListener listener);
+    void unsubscribe();
 };

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clipboard_proto::event::Event;
-use clipboard_proto::types::{HistoryEntry, PairingRequest, TrustedPeer};
+use clipboard_proto::types::{DeviceInfo, HistoryEntry, PairingRequest, TrustedPeer};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::channels::{AppCommand, AppCommandTx, Channels};
@@ -68,10 +68,16 @@ impl AppHandle {
         });
     }
 
-    pub fn restore_history_entry(&self, clipboard_id: uuid::Uuid) {
-        let _ = self
-            .app_cmd_tx
-            .send(AppCommand::RestoreHistoryEntry { clipboard_id });
+    pub fn restore_history_entry(&self, clipboard_id: uuid::Uuid) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.app_cmd_tx.send(AppCommand::RestoreHistoryEntry {
+            clipboard_id,
+            response: tx,
+        });
+        self.runtime.handle().block_on(async {
+            rx.await
+                .map_err(|_| "coordinator stopped before restoring history entry".to_string())?
+        })
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>, String> {
@@ -118,6 +124,28 @@ impl AppHandle {
         self.runtime.handle().block_on(async {
             rx.await
                 .map_err(|_| "coordinator stopped before returning trusted peers".to_string())?
+        })
+    }
+
+    pub fn discovered_peers(&self) -> Result<Vec<DeviceInfo>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .app_cmd_tx
+            .send(AppCommand::ListDiscoveredPeers { response: tx });
+        self.runtime.handle().block_on(async {
+            rx.await
+                .map_err(|_| "coordinator stopped before returning discovered peers".to_string())?
+        })
+    }
+
+    pub fn connected_device_ids(&self) -> Result<Vec<uuid::Uuid>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .app_cmd_tx
+            .send(AppCommand::ListConnectedDeviceIds { response: tx });
+        self.runtime.handle().block_on(async {
+            rx.await
+                .map_err(|_| "coordinator stopped before returning connected peers".to_string())
         })
     }
 
@@ -173,6 +201,15 @@ impl AppHandle {
     #[doc(hidden)]
     pub fn send_command(&self, cmd: AppCommand) {
         let _ = self.app_cmd_tx.send(cmd);
+    }
+
+    /// Spawn a future on this app's Tokio runtime.
+    pub(crate) fn spawn_task<F>(&self, fut: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime.spawn(fut)
     }
 }
 

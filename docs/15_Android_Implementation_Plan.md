@@ -462,6 +462,16 @@ Repository state
 
 without requiring the UI.
 
+### Record — 2026-10-09
+
+* Core (M2 remainder): added `AppCommand::ListDiscoveredPeers` (coordinator answers from `discovered_peers` with `is_trusted` from storage + `is_connected` from `connected_peers`) and `AppCommand::ListConnectedDeviceIds`; `RestoreHistoryEntry` now carries a response channel and `on_restore` returns `NotFound` for missing entries
+* Bridge UDL extended with DTOs (`BridgeDevice`, `BridgePairingRequest`, `BridgeHistoryEntry`), a curated `BridgeEvent`/`BridgeEventKind` model (flat kind tag + optional `device`/`clipboard`/`sync` payload dictionaries + `dropped_events`), a `ClipSyncEventListener` callback interface, and the full query/command surface (devices, pairing, clipboard, history, sync, subscribe/unsubscribe)
+* uniFFI UDL note: data-carrying enums are flattened/lossy — use a plain enum kind tag plus optional payload dictionaries instead
+* Bridge Rust: `ClipSyncCore` holds `Arc<AppHandle>` (clones out of the mutex before blocking, per threading rules) + a subscription handle; `subscribe` spawns a forwarder on the app runtime that converts events, emits a synthetic `EventStreamLagged` on broadcast lag, and is cancelled by `unsubscribe`/`stop`
+* Kotlin: `CoreEventCollector` (implements `ClipSyncEventListener`, holds `StateFlow`s, maintains live connection state from `DeviceConnected`/`DeviceDisconnected`, emits refresh requests on lag/history updates) + `ClipSyncRepository` (wraps `ClipSyncCore`, loads an initial snapshot, subscribes the collector, and re-queries on refresh)
+* Rust tests: 13 bridge unit tests (query emptiness, restore NotFound/InvalidArgument, event conversion, subscription delivery + cancellation); workspace clippy/fmt clean, 72 tests pass
+* On-device M3 gate on BND-L21 (API 26): `RepositoryEventPipelineTest.m3EventPipelineUpdatesRepositoryState` — `onClipboardChanged` → `ClipboardHistoryUpdated` event → collector → repository history `StateFlow` becomes non-empty; 3/3 instrumented tests pass
+
 ---
 
 # 7. Milestone 4 — CoreManager and Application Lifecycle
@@ -1387,6 +1397,20 @@ Session 1 complete (all 10 steps):
 * scope note: Session 1 implemented the M2 lifecycle surface (start/stop/identity)
   only; the remaining M2 queries and commands are open and should precede M3
 * next session = Milestone 3 (event pipeline) per this section
+
+### Record — 2026-10-09 (Session 2)
+
+Session 2 complete:
+
+* finished the M2 remainder (devices/pairing/clipboard/history/sync queries + commands,
+  including the deferred `ListDiscoveredPeers` core change and `restoreHistoryEntry` → `NotFound`)
+* implemented M3 (event pipeline): Rust forwarder with lag/cancel, curated `BridgeEvent` DTOs,
+  Kotlin `CoreEventCollector` + `ClipSyncRepository`
+* on-device M3 gate green on BND-L21 (API 26): `RepositoryEventPipelineTest`
+  (Rust state change → bridge event → collector → repository `StateFlow`); 3/3 tests pass
+* key uniFFI finding: UDL data-carrying enums are flattened/lossy — model events as a plain
+  enum kind tag + optional payload dictionaries
+* next session = Milestone 4 (CoreManager / process lifecycle) per this plan
 
 ---
 

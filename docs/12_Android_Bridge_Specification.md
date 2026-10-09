@@ -316,7 +316,7 @@ discoveredPeers() -> List<BridgeDevice>
 forgetDevice(deviceId)
 ```
 
-`discoveredPeers()` returns the current discovery roster (devices seen on the network that are not necessarily trusted). It **requires new core support**: a `ListDiscoveredPeers`-style `AppCommand` answering with the coordinator's cached discovery roster (for example, the most recent roster carried by `PeerListUpdated` events). Until that command exists, the bridge cannot serve the Android "Nearby devices" UI from a snapshot, and discovered devices would only be observable through the event stream — which is insufficient for the initial-state requirements in Section 30.
+`discoveredPeers()` returns the current discovery roster (devices seen on the network that are not necessarily trusted). It is served by the `ListDiscoveredPeers` `AppCommand`, which answers with the coordinator's cached discovery roster (each entry carries `is_trusted` from storage and `is_connected` from the coordinator's live connected set). This provides the snapshot the Android "Nearby devices" UI needs for the initial-state requirements in Section 30.
 
 The bridge-facing peer representation should contain only UI-relevant information.
 
@@ -350,14 +350,14 @@ The current Rust `TrustedPeer` model describes persisted trust but does not itse
 
 Therefore `isConnected` must not be fabricated from persisted trusted-peer data.
 
-The bridge should derive live connection state from the core's event stream by maintaining its own set of connected device IDs:
+The core exposes live connection state through the `ListConnectedDeviceIds` `AppCommand` (the coordinator's authoritative connected set). The bridge seeds `isConnected` from this snapshot and then maintains it from the event stream:
 
 ```text
-DeviceConnected      → add deviceId to the connected set
-DeviceDisconnected   → remove deviceId from the connected set
+DeviceConnected      → set deviceId connected
+DeviceDisconnected   → set deviceId disconnected
 ```
 
-On a cold start the connected set begins empty; connection state is reported as disconnected until the corresponding events arrive after startup. There is currently no core API for snapshotting connection state, so this event-derived set is the only available source — the bridge must not invent one from persisted data.
+The snapshot avoids a cold-start window in which every device is reported disconnected; the events keep the state current between snapshots. The source is always live coordinator state — never persisted trust data.
 
 `PeerListUpdated` must **not** be used as a connection-state source. It is emitted by discovery with the *discovered* roster, and its payload currently hard-codes `is_connected: false` and `is_trusted: false`. Its proper role is populating `discoveredPeers()`, not `isConnected`.
 
@@ -547,7 +547,7 @@ Rust core recognizes the recorded hash and does not rebroadcast
 
 This mirrors the desktop TUI, which calls `restore_history_entry()` and writes the content to the clipboard itself from its loaded history entry.
 
-A missing history entry is currently a silent failure: the core logs a warning and returns nothing. The bridge should surface this as a `NotFound` error (Section 20), which requires a small core change to make `restoreHistoryEntry` return a result.
+A missing history entry surfaces as a `NotFound` error (Section 20): `restoreHistoryEntry` now returns a result, and the core reports missing entries rather than logging a silent warning.
 
 The Android UI must not depend on SQLite or the Rust `Storage` type.
 

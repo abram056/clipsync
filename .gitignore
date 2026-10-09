@@ -4,3 +4,9 @@
 *.db-wal
 *.db-shm
 :memory:*
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
+android/.idea/
+android/*.iml

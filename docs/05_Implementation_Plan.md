@@ -114,6 +114,8 @@ Milestone: two desktop instances (or one desktop + one harness node) synchronize
 
 Goal: the Android app is usable end-to-end.
 
+This section is the phase-level summary. Docs 12–15 are normative for the Android architecture, bridge contract, UI behavior, and milestone sequencing; where a task below is elaborated there, that document governs.
+
 Tasks:
 
 1. Define the UniFFI interface (UDL) at `crates/clipboard-core/src/clipsync.udl` covering:
@@ -121,15 +123,16 @@ Tasks:
    - Event subscription (callback into Kotlin).
    - device list, pairing request/approve/reject, history list, restore, settings get/set.
    - `set_paused(bool)` / `is_paused()`.
-2. Generate UniFFI bindings; add the `uniffi-bindgen` step to the build.
-3. Implement the AccessibilityService for global clipboard capture:
-   - Manifest declaration and user-facing setup instructions.
-   - Listen for `TYPE_WINDOW_CONTENT_CHANGED` and focus events with debounce (250 ms).
+2. Generate UniFFI bindings; add the `uniffi-bindgen` step to the build. Establish a `cdylib` target for Android (see doc 12 §4).
+3. Implement clipboard capture using the hybrid mechanism from doc 13 §12:
+   - `ClipboardManager.OnPrimaryClipChangedListener` on API ≤ 28; a minimal `AccessibilityService` on API ≥ 29.
+   - Manifest declaration and user-facing setup instructions (doc 14 §48).
+   - Listen for `TYPE_WINDOW_CONTENT_CHANGED` and focus events with debounce (250 ms) on the accessibility path.
    - Read clipboard text on qualifying events; feed into the core via `on_clipboard_changed`.
 4. Implement the foreground service (type `dataSync`) for keepalive with a persistent notification.
    - Declare `FOREGROUND_SERVICE_DATA_SYNC` permission (required on Android 14+).
 5. Implement the **clipboard writer** Kotlin component: subscribes to `ClipboardUpdatedFromRemote` events; writes content to `ClipboardManager`.
-6. Implement the Jetpack Compose UI screens (see doc 09).
+6. Implement the Jetpack Compose UI screens (see doc 14).
 7. Implement settings persistence through the core settings API (no config file on Android).
 
 Milestone: laptop ↔ phone synchronization works in both directions.

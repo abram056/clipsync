@@ -610,6 +610,15 @@ The user should be able to:
 4. return later
 5. find synchronization still running
 
+### Record — 2026-10-12
+
+* `SyncForegroundService` (in the `service/` package) keeps sync alive when the UI is gone: `onCreate` builds the notification channel + observes the app-scoped `CoreManager.state`/`syncState`; `onStartCommand` calls `startForeground` (with `FOREGROUND_SERVICE_TYPE_DATA_SYNC` on API 29+), requests the idempotent `ensureStarted()`, and returns `START_STICKY`
+* Bounded retry per the failure model: on `Failed` the notification shows "Sync unavailable" and `ensureStarted()` is retried up to 2 times (10s/30s backoff), then the service stops itself; on `Stopped` (explicit core stop) it stops itself; `stopService` does *not* stop the core (service stop ≠ sync disable, doc 13 §7)
+* Notification (doc 13 §28/§29): silent `IMPORTANCE_LOW` channel, title "ClipSync", text "Starting…"/"Syncing with N device(s)"/"Paused"/"Sync unavailable", tap-to-open action; new `ic_notification_sync` drawable; never displays clipboard contents
+* Trigger (pre-M10): opening the app enables sync — `ClipSyncViewModel.ensureStarted()` also issues `startForegroundService` (replaced by Settings in M10); `MainActivity` requests `POST_NOTIFICATIONS` on API 33+ (no-op on the API 26 device)
+* Manifest: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS` permissions; `<service foregroundServiceType="dataSync">`. Known constraint for M13: Android 15+ caps `dataSync` at 6h/day — revisit then
+* On-device gate on BND-L21 (API 26): `SyncForegroundServiceTest` (7/7 tests pass) — service keeps a single core alive, posts the notification, survives `stopService` with the core still running; manual gate verified: open app → leave → lock 15s → unlock → notification "Syncing with 0 device(s)" persists and service is still foreground (`isForeground=true`)
+
 ---
 
 # 9. Milestone 6 — Android Clipboard Integration
@@ -1431,6 +1440,17 @@ Session 3 complete:
   (idempotent start, Activity recreation, multiple consumers); 6/6 tests pass
 * `installDebug` + launch verified the launcher icon and skeleton UI with the core running
 * next session = Milestone 5 (foreground service) per this plan
+
+### Record — 2026-10-12 (Session 4)
+
+Session 4 complete:
+
+* implemented M5 (foreground service): `SyncForegroundService` + silent notification keep the
+  core alive when the UI is gone; bounded retry on failure; opening the app enables sync via the
+  foreground service (`dataSync` type; Android 15+ 6h/day cap recorded for M13)
+* on-device gate green on BND-L21 (API 26): `SyncForegroundServiceTest` 7/7 pass; manual gate
+  verified (leave → lock → unlock → notification persists, service still foreground)
+* next session = Milestone 6 (Android clipboard integration) per this plan
 
 ---
 

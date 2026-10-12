@@ -531,6 +531,14 @@ Verify:
 * multiple ViewModels can access the same core
 * service and UI share the same core instance
 
+### Record — 2026-10-12
+
+* `CoreManager` (application scope, in `core/` package) now owns the single Rust core: creates/starts it (idempotent `ensureStarted()` guarded by a `Mutex`), coordinates the `CoreEventCollector` + refresh pipeline, exposes the `ClipSyncRepository` surface, and reports lifecycle through `StateFlow<CoreManagerState>` (`Stopped`/`Starting`/`Running`/`Failed`)
+* `ClipSyncApplication` exposes `val coreManager` lazily; the M3 `ClipSyncRepositoryImpl` was folded into `CoreManager` and removed (the `ClipSyncRepository` interface stays as the ViewModel/UI boundary, with `start()` losing its config parameter per doc 12 §28)
+* `ClipSyncViewModel` (minimal, seeds the M10 pattern) requests an idempotent `ensureStarted()` from `MainActivity` — opening or recreating the Activity reuses the existing core; its lifecycle cannot stop synchronization
+* On-device gate on BND-L21 (API 26): `CoreManagerLifecycleTest` — start idempotency + stop release, `ActivityScenario` recreation keeps the same core, and multiple consumers (two ViewModels + application-scoped access simulating the future service) share one instance; `RepositoryEventPipelineTest` refactored to `CoreManager` (6/6 tests pass)
+* Verified `installDebug` + launch: the launcher icon now appears in the app drawer and the skeleton UI renders with the Rust core running (previously the package only existed as a temporary instrumented-test install)
+
 ---
 
 # 8. Milestone 5 — Foreground Service
@@ -1411,6 +1419,18 @@ Session 2 complete:
 * key uniFFI finding: UDL data-carrying enums are flattened/lossy — model events as a plain
   enum kind tag + optional payload dictionaries
 * next session = Milestone 4 (CoreManager / process lifecycle) per this plan
+
+### Record — 2026-10-12 (Session 3)
+
+Session 3 complete:
+
+* implemented M4 (CoreManager / application lifecycle): application-scoped `CoreManager`
+  owns the single Rust core, idempotent start/stop, failure state; M3 repository impl folded in;
+  minimal `ClipSyncViewModel` + `MainActivity` wiring
+* gate green on BND-L21 (API 26): `CoreManagerLifecycleTest` proves single-core invariants
+  (idempotent start, Activity recreation, multiple consumers); 6/6 tests pass
+* `installDebug` + launch verified the launcher icon and skeleton UI with the core running
+* next session = Milestone 5 (foreground service) per this plan
 
 ---
 

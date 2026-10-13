@@ -127,7 +127,7 @@ android/app/src/main/java/com/abram056/clipsync/
     └── ...
 ```
 
-`ClipboardMonitor` is the stable adapter interface (Section 12); `ClipboardAccessibilityService` is the API 29+ capture implementation behind it, with a `ClipboardManager` listener serving API ≤ 28.
+`ClipboardMonitor` is the stable adapter interface (Section 12); `ClipboardAccessibilityService` is the API 29+ capture implementation behind it, with a `ClipboardManager` listener (backed by a primary-clip poll for OEM builds that drop the listener) serving API ≤ 28.
 
 The exact Android component used for clipboard monitoring may depend on the Android API level and the capabilities available to the target devices.
 
@@ -401,10 +401,12 @@ Android 10 (API 29) restricts clipboard reading to applications that currently h
 
 ClipSync therefore commits to a hybrid capture mechanism selected by API level:
 
-| Android version | API level | Mechanism                                      |
-| --------------- | --------- | ---------------------------------------------- |
-| 9 and below     | ≤ 28      | `ClipboardManager.OnPrimaryClipChangedListener` |
-| 10 and above    | ≥ 29      | Minimal `AccessibilityService`                 |
+| Android version | API level | Mechanism                                                         |
+| --------------- | --------- | ----------------------------------------------------------------- |
+| 9 and below     | ≤ 28      | `ClipboardManager.OnPrimaryClipChangedListener` + primary-clip poll |
+| 10 and above    | ≥ 29      | Minimal `AccessibilityService`                                    |
+
+Note (M6 finding): some OEM builds — observed on Huawei EMUI 8 — never dispatch the platform clip-changed listener at all, so the API ≤ 28 path pairs the listener with a low-frequency primary-clip poll. Both converge on the same filter, so the overlap is idempotent and a pre-existing clip is not a copy event.
 
 Requirements for this decision:
 

@@ -640,10 +640,12 @@ The implementation should hide Android clipboard details behind these components
 
 Android 10 (API 29) blocks clipboard reads for apps without input focus; a foreground service does not grant access. This milestone must implement the hybrid mechanism decided in doc 13, Section 12:
 
-* API ≤ 28: `ClipboardManager.OnPrimaryClipChangedListener`
+* API ≤ 28: `ClipboardManager.OnPrimaryClipChangedListener`, backed by a low-frequency primary-clip poll
 * API ≥ 29: a minimal `AccessibilityService` observing clipboard text changes only
 
 Both sit behind the `ClipboardMonitor` interface. The user-facing enablement step (accessibility settings) is part of Milestone 10's onboarding/Settings work, but the service itself must exist before this milestone's gate can pass on Android 10+ devices.
+
+Note: some OEM builds — observed on Huawei EMUI 8 — never dispatch the platform clip-changed listener, so the API ≤ 28 path pairs the listener with a low-frequency poll. Both converge on the same filter, so the overlap is idempotent (see the M6 Record).
 
 ---
 
@@ -719,6 +721,14 @@ Physical-device testing must demonstrate:
 * application UI closed
 * background capture while another app is focused (API 29+, service enabled)
 * screen locked where Android permits the configured clipboard behavior
+
+### Record — 2026-10-13
+
+* `ClipboardMonitor` (doc 13 §12): `PrimaryClipClipboardMonitor` for API ≤ 28 pairs the platform `OnPrimaryClipChangedListener` with a low-frequency (500 ms) primary-clip poll — **some OEM builds, notably Huawei EMUI 8, never dispatch the listener at all**, so capture would otherwise be silently dead on those devices. Both paths converge on `ClipboardFilter` (debounce, 2 MiB size guard, skip-unchanged), so the overlap stays idempotent; the poll baselines the clip present at `start()` and only forwards later differences, so a pre-existing clip is not a copy event
+* `ClipboardAccessibilityService` for API ≥ 29 observes window content/focus events and reads clipboard text only on those events, forwarding through the same `ClipboardFilter` while the core is running; capture events never start sync themselves, and user-facing enablement stays with M10
+* `ClipboardWriter` (doc 13 §15–16) applies remote content to the system clipboard on the main thread with no label, so a remote update looks like a normal copy; `CoreEventCollector` exposes `remoteClipboard` (from `CLIPBOARD_UPDATED_FROM_REMOTE`) and `SyncForegroundService` wires it to the writer and attaches/detaches the monitor on `Running`/teardown
+* On-device gate on BND-L21 (API 26, EMUI 8): `ClipboardIntegrationTest` (5/5) — writer applies content, remote events reach the writer, filter coalesces duplicates and oversized content, a local clip lands in core history, and the foreground service attaches the monitor on `Running`. Full suite 12/12. The accessibility contract is covered by the shared filter test double (doc 10 §4); this API 26 device cannot run it
+* Gate note: `localClipIsCapturedIntoCoreHistory` and `foregroundServiceStartsMonitorOnRunning` pass via the OEM-fallback poll, since the listener never fires on this device. The end-to-end physical-device items (Android ↔ laptop, Android ↔ Android, screen-locked) remain for M12, when a second device is available
 
 ---
 
@@ -1451,6 +1461,25 @@ Session 4 complete:
 * on-device gate green on BND-L21 (API 26): `SyncForegroundServiceTest` 7/7 pass; manual gate
   verified (leave → lock → unlock → notification persists, service still foreground)
 * next session = Milestone 6 (Android clipboard integration) per this plan
+
+### Record — 2026-10-13 (Session 5)
+
+Session 5 complete:
+
+* implemented M6 (Android clipboard integration): both directions wired to the Rust core —
+  `ClipboardMonitor`/`ClipboardWriter` behind the `ClipboardMonitor` interface, accessibility
+  capture for API ≥ 29, foreground-service wiring
+* **OEM finding:** Huawei EMUI 8 (BND-L21, API 26) never dispatches the platform
+  `OnPrimaryClipChangedListener`, so the API ≤ 28 monitor pairs the listener with a 500 ms
+  primary-clip poll fallback; both paths share `ClipboardFilter`, so the overlap is idempotent
+* on-device gate green on BND-L21 (API 26): full suite 12/12 pass (`ClipboardIntegrationTest`
+  5/5, including local-clip capture and service-attached monitor — both carried by the poll
+  fallback); the accessibility contract is covered by the shared filter test double
+* `RepositoryEventPipelineTest` hardened to unique per-run storage so persisted history never
+  leaks into its exact-count assertions
+* end-to-end physical-device items (Android ↔ laptop, Android ↔ Android, screen-locked) deferred
+  to M12, when a second device is available
+* next session = Milestone 7 (repository and domain state) per this plan
 
 ---
 

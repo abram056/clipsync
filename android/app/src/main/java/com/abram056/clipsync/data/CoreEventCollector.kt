@@ -44,6 +44,11 @@ class CoreEventCollector : ClipSyncEventListener {
     private val _refreshRequests = MutableSharedFlow<RefreshKind>(extraBufferCapacity = 4)
     val refreshRequests: SharedFlow<RefreshKind> = _refreshRequests.asSharedFlow()
 
+    /// Remote clipboard content waiting to be applied to the Android clipboard
+    /// by the foreground service's ClipboardWriter (doc 13 §15/§23).
+    private val _remoteClipboard = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val remoteClipboard: SharedFlow<String> = _remoteClipboard.asSharedFlow()
+
     /// Seed the collector from an authoritative snapshot loaded from the core.
     fun seedSnapshot(
         trusted: List<Device>,
@@ -83,6 +88,11 @@ class CoreEventCollector : ClipSyncEventListener {
 
             BridgeEventKind.PAIRING_REJECTED ->
                 event.device?.let { removePairingRequest(it.deviceId) }
+
+            BridgeEventKind.CLIPBOARD_UPDATED_FROM_REMOTE ->
+                event.clipboard?.content?.let { content ->
+                    if (content.isNotEmpty()) _remoteClipboard.tryEmit(content)
+                }
 
             BridgeEventKind.CLIPBOARD_HISTORY_UPDATED -> {
                 event.sync?.let { sync ->

@@ -9,4 +9,7 @@
     <string name="notification_paused">Paused</string>
     <string name="notification_unavailable">Sync unavailable</string>
     <string name="notification_action_open">Open ClipSync</string>
+
+    <string name="accessibility_service_label">ClipSync clipboard capture</string>
+    <string name="accessibility_service_description">Reads clipboard text so ClipSync can synchronize copies made while the app is in the background. It never reads, stores, or transmits anything from your screen — clipboard text only, and only while synchronization is running.</string>
 </resources>

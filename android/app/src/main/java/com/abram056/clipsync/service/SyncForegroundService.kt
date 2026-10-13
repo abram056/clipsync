@@ -32,6 +32,8 @@ class SyncForegroundService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var coreManager: CoreManager? = null
+    private var writer: ClipboardWriter? = null
+    private var monitor: ClipboardMonitor? = null
     private var retryJob: Job? = null
     private var retryAttempts = 0
     private var lastObservedState: CoreManagerState? = null
@@ -41,8 +43,10 @@ class SyncForegroundService : Service() {
         SyncNotification.ensureChannel(this)
         val manager = (application as ClipSyncApplication).coreManager
         coreManager = manager
+        writer = ClipboardWriter(this)
         // Observes once per service instance (onCreate runs exactly once).
         observeState(manager)
+        observeRemoteClipboard(manager)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -75,6 +79,29 @@ class SyncForegroundService : Service() {
         }
     }
 
+    /// Applies remote clipboard updates as they arrive (doc 13 §15/§16).
+    private fun observeRemoteClipboard(manager: CoreManager) {
+        scope.launch {
+            manager.remoteClipboard.collectLatest { content ->
+                writer?.write(content)
+            }
+        }
+    }
+
+    /// Attached only once the core is running (doc 13 §33); idempotent.
+    private fun startMonitor(manager: CoreManager) {
+        if (monitor != null) return
+        val created = ClipboardMonitor.create(this, manager)
+        created.start()
+        monitor = created
+    }
+
+    /// Detached before the core goes away (doc 13 §34); idempotent.
+    private fun stopMonitor() {
+        monitor?.stop()
+        monitor = null
+    }
+
     private suspend fun handle(
         manager: CoreManager,
         state: CoreManagerState,
@@ -87,7 +114,10 @@ class SyncForegroundService : Service() {
                 // Ignore the initial Stopped emission before ensureStarted runs;
                 // only tear down when the running core was explicitly stopped —
                 // stopping the service itself is not an explicit sync disable.
-                if (previous != null) stopSelf()
+                if (previous != null) {
+                    stopMonitor()
+                    stopSelf()
+                }
             }
 
             is CoreManagerState.Starting -> SyncNotification.update(this, textFor(state, sync))
@@ -95,9 +125,11 @@ class SyncForegroundService : Service() {
             is CoreManagerState.Running -> {
                 retryAttempts = 0
                 SyncNotification.update(this, textFor(state, sync))
+                startMonitor(manager)
             }
 
             is CoreManagerState.Failed -> {
+                stopMonitor()
                 SyncNotification.update(this, textFor(state, sync))
                 if (retryAttempts < MAX_RETRIES) {
                     retryAttempts += 1
@@ -127,8 +159,10 @@ class SyncForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        stopMonitor()
         retryJob?.cancel()
         coreManager = null
+        writer = null
         scope.cancel()
         @Suppress("DEPRECATION")
         stopForeground(STOP_FOREGROUND_REMOVE)

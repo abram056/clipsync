@@ -18,6 +18,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -76,6 +77,10 @@ class CoreManager(
     override val pairingRequests: StateFlow<List<PairingRequest>> = collector.pairingRequests
     override val history: StateFlow<List<HistoryItem>> = collector.history
     override val syncState: StateFlow<SyncState> = collector.syncState
+
+    /// Remote clipboard content to be written to the Android clipboard; the
+    /// foreground service wires it to its ClipboardWriter (doc 13 §15/§23).
+    val remoteClipboard: SharedFlow<String> = collector.remoteClipboard
 
     override suspend fun start() {
         ensureStarted()

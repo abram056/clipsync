@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Minimal clipboard capture configuration (doc 13 §12/§21, doc 05 Phase E).
+     Event types limited to content/focus changes with a 250 ms system-level
+     debounce; the service itself never inspects window content. -->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="250"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description" />

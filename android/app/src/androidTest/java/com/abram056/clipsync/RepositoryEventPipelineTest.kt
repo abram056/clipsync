@@ -25,7 +25,11 @@ class RepositoryEventPipelineTest {
     @Test
     fun m3EventPipelineUpdatesRepositoryState() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val storage = context.filesDir.resolve("clipsync-m3-gate.db").absolutePath
+        // Unique per run so persisted history never leaks into the exact-count
+        // assertions below (the app's storage survives across suite runs).
+        val storage = context.filesDir
+            .resolve("clipsync-m3-gate-${System.nanoTime()}.db")
+            .absolutePath
         val coreManager = CoreManager(context, config(storage))
 
         coreManager.start()

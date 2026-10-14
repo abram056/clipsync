@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -41,6 +42,15 @@ class RepositoryEventPipelineTest {
         }
         assertEquals(1, updatedHistory.size)
         assertEquals("m3 gate content", updatedHistory[0].content)
+
+        // M7: the repository exposes the extra doc 15 §10 surfaces alongside the
+        // pipeline, so the UI can read snapshot + event state without touching Rust.
+        assertEquals(updatedHistory[0], coreManager.recentClipboard.value)
+
+        // The predicate guarantees non-null; the assertion keeps the type non-null.
+        val identity = withTimeout(10_000) { coreManager.identity.first { it != null } }!!
+        assertTrue(identity.deviceId.isNotBlank())
+        assertTrue(identity.deviceName.isNotBlank())
 
         coreManager.stop()
     }

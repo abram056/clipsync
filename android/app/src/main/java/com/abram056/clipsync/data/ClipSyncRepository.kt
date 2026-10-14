@@ -37,12 +37,25 @@ internal fun BridgeHistoryEntry.toHistoryItem() = HistoryItem(
 /// The application-scoped [com.abram056.clipsync.core.CoreManager] implements
 /// this interface; view models and services talk to it instead of the generated
 /// API directly.
+///
+/// Beyond the doc 12 §28 surface, this adds the doc 15 §10 state the UI needs:
+/// [identity], [recentClipboard] and [errors]. Together with the snapshot load
+/// and refresh pipeline these make the repository the single Android-facing
+/// state coordinator, so the UI never has to reach into Rust itself.
 interface ClipSyncRepository {
+    val identity: StateFlow<Identity?>
     val devices: StateFlow<List<Device>>
     val discoveredDevices: StateFlow<List<Device>>
     val pairingRequests: StateFlow<List<PairingRequest>>
     val history: StateFlow<List<HistoryItem>>
+
+    /// Newest history entry, derived from [history] (doc 14 §43).
+    val recentClipboard: StateFlow<HistoryItem?>
+
     val syncState: StateFlow<SyncState>
+
+    /// User-facing errors, newest first (doc 14 §35).
+    val errors: StateFlow<List<RepositoryError>>
 
     suspend fun start()
     suspend fun stop()
@@ -56,4 +69,10 @@ interface ClipSyncRepository {
     suspend fun clearHistory()
     suspend fun setPaused(paused: Boolean)
     suspend fun onClipboardChanged(content: String)
+
+    /// Dismiss one acknowledged error. Local state only, so not suspending.
+    fun dismissError(id: String)
+
+    /// Clear every recorded error (e.g. once a failure has recovered).
+    fun clearErrors()
 }

@@ -1054,6 +1054,17 @@ interface ClipSyncRepository {
 
 The repository becomes the boundary between generated bindings and application code.
 
+Beyond this core surface, doc 15 §10 adds the state the UI consumes directly:
+
+```text
+identity           (the identity() query from §30's initial snapshot)
+recentClipboard    (newest history entry — doc 14 §43 Home preview)
+errors             (user-facing error list — §29 error events, doc 14 §35)
+dismissError / clearErrors
+```
+
+These are ordinary application-side state; they do not add anything to the bridge.
+
 ---
 
 # 29. Android Event Collector

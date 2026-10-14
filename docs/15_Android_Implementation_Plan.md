@@ -785,6 +785,50 @@ This is important because events alone are not sufficient to reconstruct the ent
 
 The UI should be able to consume realistic repository state without directly interacting with Rust.
 
+### Record — 2026-10-13
+
+* **Most of this milestone was already delivered early**: the domain models (`Device`,
+  `HistoryItem`, `PairingRequest`, `SyncState`), the `CoreEventCollector` →
+  `ClipSyncRepository` pipeline and the snapshot-based initial state loading were all built
+  during M3/M4, and the repository interface already matched doc 12 §28 exactly. This session
+  closed the two missing doc 15 §10 surfaces and the error path rather than rebuilding them
+* `recentClipboard: StateFlow<HistoryItem?>` — the Home-screen preview state (doc 14 §43),
+  written only through a single private `publishHistory()` alongside `history`. It is a
+  synchronously maintained field rather than a `stateIn`-derived flow, so a reader that has
+  just observed a new history list can never see a stale recent entry (and the collector needs
+  no coroutine scope of its own)
+* `errors: StateFlow<List<RepositoryError>>` — bounded (20) and newest first, with
+  `dismissError(id)`, `clearErrors()` and `clearErrors(kind)`. Each error carries an
+  `operation` so the UI can localize the failure ("Unable to load devices") instead of showing
+  a generic one (doc 14 §34), and severity `TRANSIENT`/`PERSISTENT` for doc 14 §35
+* the collector previously swallowed all four bridge error kinds (`DeviceConnectionFailed`,
+  `PairingFailed`, `NetworkError`, `ProtocolError`); they are now mapped into `errors`,
+  taking the detail text from the device payload's `reason` field — the bridge carries it there
+  (`with_device`), not in a dedicated message field — with a generic fallback when it is blank
+* `identity: StateFlow<Identity?>` added to the repository and loaded inside
+  `CoreManager.loadSnapshot()`, so doc 12 §30's `identity()` is part of the initial snapshot
+  alongside the other queries; `Identity` is an app-side model so UniFFI types stay hidden
+  (doc 12 §28)
+* repository command failures now record a `COMMAND` error **and** rethrow, so an operation
+  that fails is visible in the error list rather than only to its caller. Core-startup failures
+  record a generic `CORE` error ("ClipSync failed to start" — the raw Rust message stays in
+  `CoreManagerState.Failed` for diagnostics, doc 15 "Error handling") and are cleared once a
+  later start succeeds. This also means the M6 `ClipboardFilter`, which deliberately swallows a
+  forward failure, no longer hides it: a clipboard capture that cannot reach the core now shows
+  up in `errors`
+* `ClipboardRestored` previously fell through to `else -> Unit`; it now requests a targeted
+  history refresh, so the repository re-queries the authoritative history instead of assuming a
+  restore changed nothing
+* `SyncState` deliberately stays the thin data class (`isPaused`/`peerCount`/`historyBytes`);
+  the richer `Disabled/Starting/Running/Paused/...` model in doc 14 §41 is labelled a
+  presentation model, so it belongs to the M10 ViewModels
+* deferred to **M8** (doc 15 §11): event-driven device-list coherence — e.g. `PairingAccepted`
+  moving a device from discovered/pairing into trusted, and discovered dedupe against trusted
+* gate green on BND-L21 (API 26): new `RepositoryStateTest` (8 tests — error-event mapping,
+  generic fallback for a blank payload, bounded/dismissable list, kind-scoped clear, derived
+  `recentClipboard`, identity from the snapshot, record-and-rethrow) plus `RepositoryEventPipelineTest`
+  extended for `recentClipboard` + `identity`; full suite **20/20 pass**
+
 ---
 
 # 11. Milestone 8 — Pairing and Device Management
@@ -1480,6 +1524,28 @@ Session 5 complete:
 * end-to-end physical-device items (Android ↔ laptop, Android ↔ Android, screen-locked) deferred
   to M12, when a second device is available
 * next session = Milestone 7 (repository and domain state) per this plan
+
+### Record — 2026-10-13 (Session 6)
+
+Session 6 complete:
+
+* completed M7 (repository and domain state): `ClipSyncRepository` now exposes `identity`,
+  `recentClipboard` and `errors` on top of the doc 12 §28 surface, so the UI can consume
+  realistic state without reaching into Rust (doc 15 §10 gate)
+* mapped the four previously-ignored bridge error kinds into a bounded, dismissable,
+  operation-localized error list; repository commands now record-and-rethrow instead of
+  failing silently
+* scope note: most of M7 (models, collector, snapshot loading) was already in place from
+  M3/M4, so this session closed gaps rather than rebuilding them; device-list coherence and
+  device identity editing were explicitly held back for M8/M10
+* on-device gate green on BND-L21 (API 26): full suite **20/20 pass** across two consecutive
+  runs (`RepositoryStateTest` adds 8 tests)
+* debugging notes: the suite was run over USB with `adb shell am instrument` directly —
+  `connectedDebugAndroidTest` still stalls intermittently at device probe; and a stale
+  `app-debug.apk` (packaged before a refactor, so `assembleDebugAndroidTest` alone did not
+  refresh it) produced a confusing `NullPointerException` until both APKs were rebuilt and
+  reinstalled, after which the line numbers in the stack trace no longer matched source
+* next session = Milestone 8 (pairing and device management) per this plan
 
 ---
 
